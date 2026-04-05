@@ -3,8 +3,15 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(1, str(REPO_ROOT))
 
 from lib.world import (
     DEFAULT_PORT,
@@ -16,7 +23,7 @@ from lib.world import (
 )
 
 DEFAULT_STRATEGY = "student_strategy.RandomWalkStrategy"
-DEFAULT_PLAYER_NAME = "TennisBall"
+DEFAULT_PLAYER_NAME = "1"
 JS_PRELOAD_MODULES = (
     "mineflayer",
     "mineflayer-pathfinder",
@@ -33,8 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--player-num",
         dest="player_num",
         default=DEFAULT_PLAYER_NAME,
-        type=str,
-        help="The player name/number used in the bot name (default: TennisBall).",
+        type=_parse_player_id,
+        help="The player name/number used in the bot name. Keep it short, alphanumeric, and within the 16-char Minecraft username limit.",
     )
     parser.add_argument(
         "--my-team",
@@ -48,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--against",
         default=None,
         type=_parse_against_team,
-        help="The opposing team number, or 'none' for debugging mode.",
+        help="The opposing team selector: 'none', 'random', or a specific numeric team number.",
     )
     parser.add_argument(
         "--per-team-player",
@@ -67,9 +74,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--server", default=DEFAULT_SERVER)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--username",
+        default=None,
+        help="Explicit Minecraft username for the bot. Defaults to CTF-<team>-<player_num>.",
+    )
     parser.add_argument("--strategy", default=DEFAULT_STRATEGY)
     parser.add_argument("--action-tick", type=float, default=0.1)
     parser.add_argument("--snapshot-tick", type=float, default=1.0)
+    parser.add_argument(
+        "--skip-intent",
+        action="store_true",
+        help="Do not send the match creation chat command; wait for a room created by another teammate.",
+    )
+    parser.add_argument(
+        "--wait-for-users",
+        default="",
+        help="Comma-separated Minecraft usernames that must be online before sending the match chat command.",
+    )
     parser.add_argument(
         "--verbose",
         action="store_true",
@@ -100,12 +122,15 @@ def main() -> int:
             js_bridge=js_bridge,
             team_num=args.team_num,
             player_num=args.player_num,
+            username=args.username,
             against_team=args.against,
             total_player_per_team=args.per_team_player,
             map_mode=args.map_mode,
             server=args.server,
             port=args.port,
             verbose=args.verbose,
+            announce_intent=not args.skip_intent,
+            expected_online_users=_parse_wait_for_users(args.wait_for_users),
         )
         strategy = _load_strategy(args.strategy)
         world.run_with_logging(
@@ -186,17 +211,36 @@ def _parse_positive_int(value: str) -> int:
     return parsed
 
 
-def _parse_against_team(value: str) -> int | None:
+def _parse_player_id(value: str) -> str:
+    parsed = value.strip()
+    if not parsed:
+        raise argparse.ArgumentTypeError("Expected a non-empty player id.")
+    if any(character == "-" or character.isspace() for character in parsed):
+        raise argparse.ArgumentTypeError("Player id must not contain spaces or '-'.")
+    if not parsed.isalnum():
+        raise argparse.ArgumentTypeError("Player id must be alphanumeric.")
+    return parsed
+
+
+def _parse_against_team(value: str) -> int | str | None:
     normalized = value.strip().lower()
     if normalized == "none":
         return None
+    if normalized == "random":
+        return "random"
     try:
         parsed = int(normalized)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("Expected a positive integer or 'none'.") from exc
+        raise argparse.ArgumentTypeError("Expected 'none', 'random', or a positive integer.") from exc
     if parsed <= 0:
-        raise argparse.ArgumentTypeError("Expected a positive integer or 'none'.")
+        raise argparse.ArgumentTypeError("Expected 'none', 'random', or a positive integer.")
     return parsed
+
+
+def _parse_wait_for_users(value: str) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
 if __name__ == "__main__":

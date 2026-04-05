@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
+import random
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,15 +17,36 @@ from .observation import Observation, TeamName, normalize_team_name
 DEFAULT_SERVER = "10.31.0.101"
 DEFAULT_PORT = 25565
 INIT_RETRY_SECONDS = 1.0
+ONLINE_WAIT_TIMEOUT_SECONDS = 30.0
 DEFAULT_LOG_DIR = Path("logs")
 FAST_PATHFINDER_MAX_DROP_DOWN = 4
 FAST_PATHFINDER_COST_MULTIPLIER = 8
+SPRINT_REFRESH_SECONDS = 1.0
+BFS_GOAL_SEARCH_RADIUS = 6
+STUCK_MOVEMENT_SECONDS = 1.5
+STUCK_PROGRESS_EPSILON = 0.75
+STUCK_RECOVERY_COOLDOWN_SECONDS = 1.5
+STUCK_RECOVERY_TURN_DISTANCE = 3.0
+STUCK_RECOVERY_ANGLE_DEGREES = 30.0
+LEAF_BLOCK_NAMES = (
+    "oak_leaves",
+    "spruce_leaves",
+    "birch_leaves",
+    "jungle_leaves",
+    "acacia_leaves",
+    "dark_oak_leaves",
+    "mangrove_leaves",
+    "azalea_leaves",
+    "flowering_azalea_leaves",
+    "cherry_leaves",
+    "pale_oak_leaves",
+)
 
 
 def build_multi_log_path(
     *,
     team_num: int,
-    player_num: int,
+    player_num: int | str,
     when: datetime | None = None,
     log_dir: Path = DEFAULT_LOG_DIR,
 ) -> Path:
@@ -33,7 +57,7 @@ def build_multi_log_path(
 def build_final_shot_path(
     *,
     team_num: int,
-    player_num: int,
+    player_num: int | str,
     when: datetime | None = None,
     log_dir: Path = DEFAULT_LOG_DIR,
 ) -> Path:
@@ -86,13 +110,17 @@ class World:
         *,
         js_bridge: JavaScriptBridge,
         team_num: int,
-        player_num: int,
-        against_team: int | None = None,
+        player_num: int | str,
+        username: str | None = None,
+        against_team: int | str | None = None,
         total_player_per_team: int = 1,
         map_mode: str = "fixed",
         server: str = DEFAULT_SERVER,
         port: int = DEFAULT_PORT,
         verbose: bool = False,
+        announce_intent: bool = True,
+        expected_online_users: Iterable[str] | None = None,
+        online_wait_timeout: float = ONLINE_WAIT_TIMEOUT_SECONDS,
         settle_seconds: float = 1.0,
         bounds: ScanBounds | None = None,
     ) -> None:
@@ -100,11 +128,20 @@ class World:
         self.server = server
         self.port = port
         self.verbose = verbose
+        self.announce_intent = announce_intent
+        self.expected_online_users = frozenset(
+            username.strip() for username in (expected_online_users or ()) if username.strip()
+        )
+        self.online_wait_timeout = max(0.0, online_wait_timeout)
         self.settle_seconds = settle_seconds
         self.bounds = bounds or ScanBounds()
         self.team_num = team_num
         self.player_num = player_num
-        self.bot_name = _normalize_bot_name(team_num=team_num, player_num=player_num)
+        self.bot_name = (
+            _normalize_explicit_username(username)
+            if username is not None
+            else _normalize_bot_name(team_num=team_num, player_num=player_num)
+        )
         self.against_team = against_team
         self.total_player_per_team = total_player_per_team
         self.map_mode = _normalize_map_mode(map_mode)
@@ -133,12 +170,16 @@ class World:
         self._chat_listener: Any | None = None
         self._message_listener: Any | None = None
         self._message_object_listener: Any | None = None
+        self._spawn_listener: Any | None = None
+        self._respawn_listener: Any | None = None
         self._listeners_installed = False
         self._ready_observation: Observation | None = None
         self._intent_announced = False
+        self._seen_online_users: set[str] = {self.bot_name}
         self._ready_prompt_received = False
         self._ready_prompt_event = threading.Event()
         self._ready_announced = False
+        self._match_world_detected = False
         self._game_started = False
         self._game_ended = False
         self._game_start_event = threading.Event()
@@ -148,27 +189,43 @@ class World:
         )
         self._last_quick_snapshot: dict[str, Any] | None = None
         self._last_move_goal: tuple[int, int, int, bool] | None = None
+        self._last_move_progress_position: tuple[float, float, float] | None = None
+        self._last_move_progress_at = time.monotonic()
+        self._stuck_recovery_until = 0.0
+        self._last_sprint_refresh_at = 0.0
 
     def join_the_world(self) -> Any:
         self._log("Start joining the world...")
         bot = self._connect_bot()
         self._log("Bot successfully created!")
         self._install_game_start_listeners()
-        while not self._intent_announced and not self._game_ended:
-            self._announce_intent()
-            if not self._intent_announced:
-                time.sleep(INIT_RETRY_SECONDS)
+
+        if self.expected_online_users:
+            self._wait_for_expected_players()
+
+        # Step 1: Announce room intent (leader) or skip (follower)
+        if self.announce_intent:
+            while not self._intent_announced and not self._game_ended:
+                self._announce_intent()
+                if not self._intent_announced:
+                    time.sleep(INIT_RETRY_SECONDS)
+            self._log("Room intent sent. Now sending readiness...")
+        else:
+            self._log("Skipping intent announcement; waiting for teammate-created room.")
 
         if self._game_ended:
-            raise RuntimeError("Game ended before the bot announced its intent.")
-        if not self._ready_prompt_received and not self._game_ended:
-            self._ready_prompt_event.wait()
-        if self._game_ended and not self._ready_prompt_received:
-            raise RuntimeError('Game ended before the server asked "Are you ready?".')
-        self._announce_ready()
+            raise RuntimeError("Game ended before the bot could join.")
 
-        if not self._game_started and not self._game_ended:
-            self._game_start_event.wait()
+        # Step 2: Immediately start sending "I'm ready!" every few seconds
+        #         until the server responds with "Game start: ..."
+        #         Per the docs: announce room -> send I'm ready! -> game starts
+        ready_interval = 3.0  # seconds between ready pings
+        while not self._game_started and not self._game_ended:
+            self._safe_chat("I'm ready!")
+            self._ready_announced = True
+            self._log("Sent 'I'm ready!' in chat")
+            self._game_start_event.wait(ready_interval)
+
         if self._game_ended and not self._game_started:
             raise RuntimeError("Game ended before start.")
         if self._ready_observation is None:
@@ -215,8 +272,16 @@ class World:
             return
         goal_signature = (action.x, action.z, action.radius, action.sprint)
         try:
-            if action.sprint:
-                _set_control_state(self._bot, "sprint", True)
+            current_position = _current_bot_position(self._bot)
+            self._update_move_progress(current_position)
+            now = time.monotonic()
+            _refresh_sprint_jump_state(
+                self._bot,
+                now,
+                last_refresh_at=self._last_sprint_refresh_at,
+                refresh_interval=SPRINT_REFRESH_SECONDS,
+            )
+            self._last_sprint_refresh_at = now
             movements = (
                 self._fast_movements
                 if action.sprint and self._fast_movements is not None
@@ -224,11 +289,18 @@ class World:
             )
             if getattr(pathfinder, "movements", None) is not movements:
                 pathfinder.setMovements(movements)
+            if now < self._stuck_recovery_until:
+                return
             if self._last_move_goal == goal_signature:
+                if self._maybe_recover_from_stuck(action, pathfinder, current_position):
+                    return
                 return
             goal_y = _current_goal_y(self._bot)
-            pathfinder.setGoal(self._goal_near(action.x, goal_y, action.z, action.radius))
+            goal_x, goal_y, goal_z = _resolve_bfs_goal(self._bot, action, goal_y)
+            pathfinder.setGoal(self._goal_near(goal_x, goal_y, goal_z, action.radius))
             self._last_move_goal = goal_signature
+            self._stuck_recovery_until = 0.0
+            self._update_move_progress(current_position)
         except Exception:
             return
 
@@ -246,7 +318,12 @@ class World:
             return
         try:
             self._last_move_goal = None
+            self._last_move_progress_position = None
+            self._last_move_progress_at = time.monotonic()
+            self._stuck_recovery_until = 0.0
+            self._last_sprint_refresh_at = 0.0
             _set_control_state(self._bot, "sprint", False)
+            _set_control_state(self._bot, "jump", False)
             self._bot.pathfinder.setGoal(None)
         except Exception:
             try:
@@ -352,6 +429,7 @@ class World:
             self._assigned_teams = {}
             self._ready_observation = None
             self._intent_announced = False
+            self._seen_online_users = {self.bot_name}
             self._ready_prompt_received = False
             self._ready_prompt_event.clear()
             self._ready_announced = False
@@ -453,6 +531,7 @@ class World:
         mc_data = require("minecraft-data")(bot.version)
         self._pathfinder = pathfinder
         self._movements = pathfinder.Movements(bot, mc_data)
+        _apply_leaf_avoidance(self._movements, mc_data)
         self._fast_movements = _build_fast_movements(pathfinder, bot, mc_data)
         self._goal_near = pathfinder.goals.GoalNear
         return bot
@@ -508,17 +587,27 @@ class World:
         def _on_messagestr(maybe_sender, maybe_message, *args):
             self._handle_incoming_message(maybe_sender, maybe_message, *args)
 
-        #@On(self._bot, "chat")
-        #def _on_chat(*args):
-        #    self._handle_incoming_message(*args)
+        @On(self._bot, "chat")
+        def _on_chat(*args):
+            self._handle_incoming_message(*args)
 
-        #@On(self._bot, "message")
-        #def _on_message(*args):
-        #    self._handle_incoming_message(*args)
+        @On(self._bot, "message")
+        def _on_message(*args):
+            self._handle_incoming_message(*args)
+
+        @On(self._bot, "spawn")
+        def _on_spawn(*_args):
+            self._handle_world_transition("spawn")
+
+        @On(self._bot, "respawn")
+        def _on_respawn(*_args):
+            self._handle_world_transition("respawn")
 
         self._message_listener = _on_messagestr
-        #self._chat_listener = _on_chat
-        #self._message_object_listener = _on_message
+        self._chat_listener = _on_chat
+        self._message_object_listener = _on_message
+        self._spawn_listener = _on_spawn
+        self._respawn_listener = _on_respawn
         self._listeners_installed = True
 
     def _remove_game_start_listeners(self) -> None:
@@ -531,24 +620,66 @@ class World:
                 self._off(self._bot, "chat", self._chat_listener)
             if self._message_object_listener is not None:
                 self._off(self._bot, "message", self._message_object_listener)
+            if self._spawn_listener is not None:
+                self._off(self._bot, "spawn", self._spawn_listener)
+            if self._respawn_listener is not None:
+                self._off(self._bot, "respawn", self._respawn_listener)
         except Exception:
             pass
         finally:
             self._message_listener = None
             self._chat_listener = None
             self._message_object_listener = None
+            self._spawn_listener = None
+            self._respawn_listener = None
             self._listeners_installed = False
 
+    def _wait_for_expected_players(self) -> None:
+        deadline = time.monotonic() + self.online_wait_timeout
+        while not self._game_ended:
+            self._refresh_online_users()
+            missing_users = sorted(self.expected_online_users - self._seen_online_users)
+            if not missing_users:
+                self._log(
+                    "All expected bots are online. Running match command immediately: "
+                    f"{', '.join(sorted(self.expected_online_users))}"
+                )
+                return
+            if time.monotonic() >= deadline:
+                self._log(
+                    "Timed out waiting for all expected bots to appear online; continuing anyway. "
+                    f"Missing: {', '.join(missing_users)}"
+                )
+                return
+            self._log(f"Waiting for bots to join server before match command: {', '.join(missing_users)}")
+            time.sleep(INIT_RETRY_SECONDS)
+
+    def _refresh_online_users(self) -> None:
+        if self._bot is None or self._players_to_json is None:
+            return
+        try:
+            players_payload = json.loads(self._players_to_json(self._bot))
+        except Exception:
+            return
+        if not isinstance(players_payload, list):
+            return
+        for player in players_payload:
+            if not isinstance(player, dict):
+                continue
+            username = player.get("username")
+            if isinstance(username, str) and username:
+                self._seen_online_users.add(username)
+
     def _handle_incoming_message(self, maybe_sender, maybe_message, *args: Any) -> None:
-        # The JS bridge may pass the bot Proxy as arg1; coerce everything to str.
         texts: list[str] = []
         for raw in (maybe_sender, maybe_message, *args):
-            try:
-                s = str(raw)
-            except Exception:
-                continue
-            texts.append(s)
+            text = _coerce_message_text(raw).strip()
+            if text:
+                texts.append(text)
         combined = " ".join(texts)
+
+        if combined:
+            self._log(f"Incoming message: {combined}")
 
         if "Are you ready?" in combined:
             self._ready_prompt_received = True
@@ -574,17 +705,25 @@ class World:
             self.stop_actions()
             self._log("Received 'Game over!' from system")
 
-    def _announce_intent(self) -> None:
-        if self._intent_announced:
+    def _handle_world_transition(self, source: str) -> None:
+        if self._game_started or self._game_ended:
             return
-        self._intent_announced = self._safe_chat(self.intent_message)
-        self._log(f"Intent Announced: {self.intent_message}")
+        self._match_world_detected = True
+        self._ready_prompt_received = True
+        self._ready_prompt_event.set()
+        self._log(f"Detected world transition via {source}; treating it as readiness phase.")
 
-    def _announce_ready(self) -> None:
-        if self._ready_announced:
+    def _announce_intent(self) -> None:
+        self._intent_announced = self._safe_chat(self.intent_message) or self._intent_announced
+        if self._intent_announced:
+            self._log(f"Intent Announced: {self.intent_message}")
+
+    def _announce_ready(self, *, force: bool = False) -> None:
+        if self._ready_announced and not force:
             return
-        self._ready_announced = self._safe_chat("I'm ready!")
-        self._log("Readiness Announced")
+        self._ready_announced = self._safe_chat("I'm ready!") or self._ready_announced
+        if self._ready_announced:
+            self._log("Readiness Announced")
 
     def _log(self, message: str) -> None:
         if self.verbose:
@@ -619,14 +758,67 @@ class World:
             },
         )
 
+    def _update_move_progress(self, position: tuple[float, float, float] | None) -> None:
+        if position is None:
+            return
+        if self._last_move_progress_position is None:
+            self._last_move_progress_position = position
+            self._last_move_progress_at = time.monotonic()
+            return
+        if _horizontal_distance(position, self._last_move_progress_position) >= STUCK_PROGRESS_EPSILON:
+            self._last_move_progress_position = position
+            self._last_move_progress_at = time.monotonic()
 
-def _normalize_bot_name(*, team_num: int, player_num: int) -> str:
-    return f"CTF-{team_num}-{player_num}"
+    def _maybe_recover_from_stuck(
+        self,
+        action: MoveTo,
+        pathfinder: Any,
+        current_position: tuple[float, float, float] | None,
+    ) -> bool:
+        if current_position is None:
+            return False
+        if time.monotonic() - self._last_move_progress_at < STUCK_MOVEMENT_SECONDS:
+            return False
+        recovery_goal = _compute_recovery_goal(current_position, action)
+        if recovery_goal is None:
+            return False
+        recovery_x, recovery_y, recovery_z = recovery_goal
+        pathfinder.setGoal(self._goal_near(recovery_x, recovery_y, recovery_z, max(1, action.radius)))
+        self._last_move_goal = None
+        self._last_move_progress_position = current_position
+        self._last_move_progress_at = time.monotonic()
+        self._stuck_recovery_until = time.monotonic() + STUCK_RECOVERY_COOLDOWN_SECONDS
+        self._log(
+            f"Detected stuck movement for >{STUCK_MOVEMENT_SECONDS:.0f}s; rerouting via "
+            f"({recovery_x}, {recovery_z}) before retrying target ({action.x}, {action.z})."
+        )
+        return True
+
+
+def _normalize_bot_name(*, team_num: int, player_num: int | str) -> str:
+    bot_name = f"CTF-{team_num}-{player_num}"
+    if len(bot_name) > 16:
+        raise ValueError(
+            f"Generated bot username {bot_name!r} exceeds Minecraft's 16 character limit. "
+            "Use a shorter player id or a shorter team number."
+        )
+    return bot_name
+
+
+def _normalize_explicit_username(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("Explicit bot username must not be empty.")
+    if len(normalized) > 16:
+        raise ValueError(
+            f"Explicit bot username {normalized!r} exceeds Minecraft's 16 character limit."
+        )
+    return normalized
 
 
 def _build_intent_message(
     *,
-    against_team: int | None,
+    against_team: int | str | None,
     total_player_per_team: int,
     map_mode: str,
 ) -> str:
@@ -676,22 +868,20 @@ def _coerce_message_text(value: Any) -> str:
         return ""
     if isinstance(value, str):
         return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
 
     text_attr = getattr(value, "text", None)
     if isinstance(text_attr, str):
         return text_attr
 
-    to_string = getattr(value, "toString", None)
-    if callable(to_string):
-        try:
-            rendered = to_string()
-            if isinstance(rendered, str):
-                return rendered
-        except Exception:
-            pass
-
     json_attr = getattr(value, "json", None)
     if json_attr is not None:
+        if callable(json_attr):
+            try:
+                json_attr = json_attr()
+            except Exception:
+                json_attr = None
         flattened = _flatten_chat_json(json_attr)
         if flattened:
             return flattened
@@ -701,7 +891,16 @@ def _coerce_message_text(value: Any) -> str:
         if flattened:
             return flattened
 
-    return str(value)
+    to_string = getattr(value, "toString", None)
+    if callable(to_string):
+        try:
+            rendered = to_string()
+            if isinstance(rendered, str) and rendered != "[object Object]":
+                return rendered
+        except Exception:
+            pass
+
+    return ""
 
 
 def _flatten_chat_json(value: Any) -> str:
@@ -711,26 +910,49 @@ def _flatten_chat_json(value: Any) -> str:
         return value
     if isinstance(value, list | tuple):
         return " ".join(part for part in (_flatten_chat_json(item) for item in value) if part)
-    if isinstance(value, dict):
+    if not isinstance(value, dict) and hasattr(value, "__iter__") and not hasattr(value, "keys"):
+        try:
+            return " ".join(
+                part for part in (_flatten_chat_json(item) for item in value) if part
+            )
+        except Exception:
+            pass
+    if isinstance(value, dict) or hasattr(value, "keys") or hasattr(value, "get"):
         parts: list[str] = []
-        text = value.get("text")
+        text = _mapping_like_get(value, "text")
         if isinstance(text, str) and text:
             parts.append(text)
-        extra = value.get("extra")
+        extra = _mapping_like_get(value, "extra")
         if extra is not None:
             extra_text = _flatten_chat_json(extra)
             if extra_text:
                 parts.append(extra_text)
-        translate = value.get("translate")
+        translate = _mapping_like_get(value, "translate")
         if isinstance(translate, str) and translate:
             parts.append(translate)
-        with_value = value.get("with")
+        with_value = _mapping_like_get(value, "with")
         if with_value is not None:
             with_text = _flatten_chat_json(with_value)
             if with_text:
                 parts.append(with_text)
         return " ".join(part for part in parts if part)
     return ""
+
+
+def _mapping_like_get(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(key)
+    get_method = getattr(value, "get", None)
+    if callable(get_method):
+        try:
+            return get_method(key)
+        except Exception:
+            pass
+    try:
+        return value[key]
+    except Exception:
+        pass
+    return getattr(value, key, None)
 
 
 def _normalize_actions(actions: Action | Iterable[Action] | None) -> tuple[Action, ...]:
@@ -769,7 +991,33 @@ def _build_fast_movements(pathfinder: Any, bot: Any, mc_data: Any) -> Any:
     _set_optional_attr(movements, "entityCost", FAST_PATHFINDER_COST_MULTIPLIER)
     _set_optional_attr(movements, "dontCreateFlow", True)
     _clear_optional_mapping(movements, "entityIntersections")
+    _apply_leaf_avoidance(movements, mc_data)
     return movements
+
+
+def _apply_leaf_avoidance(movements: Any, mc_data: Any) -> None:
+    blocks_to_avoid = getattr(movements, "blocksToAvoid", None)
+    add_method = getattr(blocks_to_avoid, "add", None)
+    if not callable(add_method):
+        return
+    for block_id in _collect_leaf_block_ids(mc_data):
+        try:
+            add_method(block_id)
+        except Exception:
+            continue
+
+
+def _collect_leaf_block_ids(mc_data: Any) -> tuple[int, ...]:
+    block_ids: list[int] = []
+    blocks_by_name = getattr(mc_data, "blocksByName", None)
+    for block_name in LEAF_BLOCK_NAMES:
+        block_data = _mapping_like_get(blocks_by_name, block_name)
+        if block_data is None:
+            continue
+        block_id = _mapping_like_get(block_data, "id")
+        if isinstance(block_id, int):
+            block_ids.append(block_id)
+    return tuple(dict.fromkeys(block_ids))
 
 
 def _current_goal_y(bot: Any) -> int:
@@ -779,6 +1027,162 @@ def _current_goal_y(bot: Any) -> int:
         return int(y)
     except Exception:
         return 1
+
+
+def _current_bot_position(bot: Any) -> tuple[float, float, float] | None:
+    position = getattr(getattr(bot, "entity", None), "position", None)
+    if position is None:
+        return None
+    x = getattr(position, "x", None)
+    y = getattr(position, "y", None)
+    z = getattr(position, "z", None)
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)) or not isinstance(z, (int, float)):
+        return None
+    return (float(x), float(y), float(z))
+
+
+def _resolve_bfs_goal(bot: Any, action: MoveTo, goal_y: int) -> tuple[int, int, int]:
+    target_x = int(action.x)
+    target_z = int(action.z)
+    resolved = _find_nearest_safe_goal(bot, target_x, goal_y, target_z, BFS_GOAL_SEARCH_RADIUS)
+    if resolved is not None:
+        return resolved
+    return (target_x, goal_y, target_z)
+
+
+def _find_nearest_safe_goal(
+    bot: Any,
+    target_x: int,
+    goal_y: int,
+    target_z: int,
+    search_radius: int,
+) -> tuple[int, int, int] | None:
+    start = (target_x, target_z)
+    queue: deque[tuple[int, int]] = deque((start,))
+    visited = {start}
+    while queue:
+        x, z = queue.popleft()
+        if _is_safe_goal_cell(bot, x, goal_y, z):
+            return (x, goal_y, z)
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx = x + dx
+            nz = z + dz
+            if abs(nx - target_x) + abs(nz - target_z) > search_radius:
+                continue
+            candidate = (nx, nz)
+            if candidate in visited:
+                continue
+            visited.add(candidate)
+            queue.append(candidate)
+    return None
+
+
+def _is_safe_goal_cell(bot: Any, x: int, goal_y: int, z: int) -> bool:
+    if not _is_walkable_cell(bot, x, goal_y, z):
+        return False
+    if _is_diagonal_pinched(bot, x, goal_y, z):
+        return False
+    return _cell_clearance_score(bot, x, goal_y, z) >= 1
+
+
+def _cell_clearance_score(bot: Any, x: int, goal_y: int, z: int) -> int:
+    score = 0
+    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        if _is_body_clear(bot, x + dx, goal_y, z + dz):
+            score += 1
+    return score
+
+
+def _is_walkable_cell(bot: Any, x: int, goal_y: int, z: int) -> bool:
+    if not _is_body_clear(bot, x, goal_y, z):
+        return False
+    floor_block = _block_at_grid(bot, x, goal_y - 1, z)
+    return _is_solid_block(floor_block)
+
+
+def _is_body_clear(bot: Any, x: int, goal_y: int, z: int) -> bool:
+    feet_block = _block_at_grid(bot, x, goal_y, z)
+    head_block = _block_at_grid(bot, x, goal_y + 1, z)
+    return _is_passable_block(feet_block) and _is_passable_block(head_block)
+
+
+def _is_diagonal_pinched(bot: Any, x: int, goal_y: int, z: int) -> bool:
+    corners = ((1, 1), (1, -1), (-1, 1), (-1, -1))
+    for dx, dz in corners:
+        corner_block = _block_at_grid(bot, x + dx, goal_y, z + dz)
+        side_x_block = _block_at_grid(bot, x + dx, goal_y, z)
+        side_z_block = _block_at_grid(bot, x, goal_y, z + dz)
+        if _is_solid_block(corner_block) and _is_solid_block(side_x_block) and _is_solid_block(side_z_block):
+            return True
+    return False
+
+
+def _block_at_grid(bot: Any, x: int, y: int, z: int) -> Any:
+    block_at = getattr(bot, "blockAt", None)
+    if not callable(block_at):
+        return None
+    position = getattr(bot, "entity", None)
+    vec3_ctor = None
+    world = getattr(bot, "world", None)
+    if world is not None:
+        vec3_ctor = None
+    try:
+        if hasattr(bot, "pathfinder"):
+            pass
+        return block_at(type(getattr(bot.entity, "position", None))(x, y, z))
+    except Exception:
+        pass
+    try:
+        return block_at(bot.entity.position.__class__(x, y, z))
+    except Exception:
+        return None
+
+
+def _is_passable_block(block: Any) -> bool:
+    if block is None:
+        return True
+    name = getattr(block, "name", None)
+    bounding_box = getattr(block, "boundingBox", None)
+    if name in {"air", "cave_air", "void_air"}:
+        return True
+    return bounding_box in {None, "empty"}
+
+
+def _is_solid_block(block: Any) -> bool:
+    if block is None:
+        return False
+    if _is_passable_block(block):
+        return False
+    name = getattr(block, "name", None)
+    return name not in {"water", "lava"}
+
+
+def _horizontal_distance(
+    left: tuple[float, float, float],
+    right: tuple[float, float, float],
+) -> float:
+    dx = left[0] - right[0]
+    dz = left[2] - right[2]
+    return (dx * dx + dz * dz) ** 0.5
+
+
+def _compute_recovery_goal(
+    current_position: tuple[float, float, float],
+    action: MoveTo,
+) -> tuple[int, int, int] | None:
+    current_x, current_y, current_z = current_position
+    delta_x = float(action.x) - current_x
+    delta_z = float(action.z) - current_z
+    magnitude = (delta_x * delta_x + delta_z * delta_z) ** 0.5
+    if magnitude < 0.001:
+        return None
+    opposite_angle = math.atan2(-delta_z, -delta_x)
+    angle_offset = math.radians(random.uniform(-STUCK_RECOVERY_ANGLE_DEGREES, STUCK_RECOVERY_ANGLE_DEGREES))
+    recovery_angle = opposite_angle + angle_offset
+    recovery_x = int(round(current_x + math.cos(recovery_angle) * STUCK_RECOVERY_TURN_DISTANCE))
+    recovery_z = int(round(current_z + math.sin(recovery_angle) * STUCK_RECOVERY_TURN_DISTANCE))
+    recovery_y = int(round(current_y))
+    return (recovery_x, recovery_y, recovery_z)
 
 
 def _set_optional_attr(target: Any, name: str, value: Any) -> None:
@@ -812,6 +1216,21 @@ def _set_control_state(bot: Any, control: str, enabled: bool) -> None:
         set_control_state(control, enabled)
     except Exception:
         pass
+
+
+def _refresh_sprint_jump_state(
+    bot: Any,
+    now: float,
+    *,
+    last_refresh_at: float,
+    refresh_interval: float,
+) -> None:
+    should_toggle = last_refresh_at <= 0.0 or (now - last_refresh_at) >= refresh_interval
+    if should_toggle:
+        _set_control_state(bot, "sprint", False)
+        _set_control_state(bot, "jump", False)
+    _set_control_state(bot, "sprint", True)
+    _set_control_state(bot, "jump", True)
 
 
 def _build_dynamic_state(

@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# Start the CTF bot (Defender role — TennisBall)
+# Start the partner CTF bot (Defender role) in empty-arena debug mode by default.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
 export PYTHONIOENCODING=utf-8
 
-TEAM_NUM=7891114514
-PLAYER_NUM=TennisBall
-AGAINST_TEAM=1
-PER_TEAM_PLAYER=1
-MAP_MODE=fixed
+TEAM_NUM="${TEAM_NUM:-7891114514}"
+PLAYER_NUM="${PLAYER_NUM:-1}"
+AGAINST_TEAM="${AGAINST_TEAM:-none}"
+PER_TEAM_PLAYER="${PER_TEAM_PLAYER:-2}"
+MAP_MODE="${MAP_MODE:-fixed}"
+
+cd "$SCRIPT_DIR"
 
 python main.py \
   --my-team "$TEAM_NUM" \

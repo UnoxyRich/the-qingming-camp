@@ -1,10 +1,12 @@
 $ErrorActionPreference = "Stop"
 $env:PYTHONIOENCODING = "utf-8"
 
-$TEAM_NUM = 7891114514
-$AGAINST_TEAM = 1
-$PER_TEAM_PLAYER = 2
-$MAP_MODE = "fixed"
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+$TEAM_NUM = if ($env:TEAM_NUM) { $env:TEAM_NUM } else { 7891114514 }
+$AGAINST_TEAM = if ($env:AGAINST_TEAM) { $env:AGAINST_TEAM } else { "none" }
+$PER_TEAM_PLAYER = if ($env:PER_TEAM_PLAYER) { $env:PER_TEAM_PLAYER } else { 2 }
+$MAP_MODE = if ($env:MAP_MODE) { $env:MAP_MODE } else { "fixed" }
 
 $bots = @(
     @{ Name = "UnoxyRich"; No = 1 },
@@ -25,7 +27,7 @@ $processes = foreach ($bot in $bots) {
             "--strategy", "ctf_strategy.AttackerStrategy",
             "--verbose"
         ) `
-        -WorkingDirectory $PSScriptRoot `
+        -WorkingDirectory $scriptDir `
         -NoNewWindow `
         -PassThru
 }

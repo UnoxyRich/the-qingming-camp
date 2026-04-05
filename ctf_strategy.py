@@ -100,7 +100,7 @@ class AttackerStrategy:
     """Aggressive flag-capturing strategy.
 
     Priorities:
-    1. If jailed → wait
+    1. If jailed → keep moving to the prison gate
     2. If carrying flag → sprint home to score (with evasion)
     3. Rescue nearby jailed teammate (opportunistic)
     4. Capture enemy flag (prefer safest one away from enemies)
@@ -122,10 +122,11 @@ class AttackerStrategy:
         pos = obs.me.position
         enemies = obs.enemies
 
-        # 1. Jailed — stay put
+        # 1. Jailed — keep pathing to the prison gate so rescue can happen faster
         if me.in_prison:
-            self._announce(actions, "Jailed", pos.x, pos.z)
-            actions.append(MoveTo(x=pos.x, z=pos.z, radius=0, sprint=False))
+            gate = _prison_gate_for_team(obs.my_team)
+            self._announce(actions, "Jailed at gate", gate.x, gate.z)
+            actions.append(MoveTo(x=gate.x, z=gate.z, radius=1, sprint=True))
             return actions
 
         # 2. Carrying flag — rush home to score
@@ -192,7 +193,7 @@ class DefenderStrategy:
     """Defensive strategy: guard flags, intercept carriers, rescue teammates.
 
     Priorities:
-    1. If jailed → wait
+    1. If jailed → keep moving to the prison gate
     2. If carrying flag → sprint home to score
     3. Chase enemy flag carrier (highest defensive priority)
     4. Rescue jailed teammates
@@ -216,10 +217,11 @@ class DefenderStrategy:
         pos = obs.me.position
         enemies = obs.enemies
 
-        # 1. Jailed — stay put
+        # 1. Jailed — keep pathing to the prison gate so rescue can happen faster
         if me.in_prison:
-            self._announce(actions, "Jailed", pos.x, pos.z)
-            actions.append(MoveTo(x=pos.x, z=pos.z, radius=0, sprint=False))
+            gate = _prison_gate_for_team(obs.my_team)
+            self._announce(actions, "Jailed at gate", gate.x, gate.z)
+            actions.append(MoveTo(x=gate.x, z=gate.z, radius=1, sprint=True))
             return actions
 
         # 2. Carrying flag — rush home to score (even defenders score if they get a flag)
