@@ -11,6 +11,7 @@ class MoveTo:
     radius: int = 1
     sprint: bool = True
     jump: bool = False
+    avoid_entities: bool = False
 
 
 @dataclass(frozen=True, slots=True)

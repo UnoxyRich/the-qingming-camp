@@ -24,13 +24,13 @@ FAST_PATHFINDER_COST_MULTIPLIER = 10
 FAST_PATHFINDER_SEARCH_RADIUS = 48
 FAST_PATHFINDER_TICK_TIMEOUT = 120
 FAST_PATHFINDER_THINK_TIMEOUT = 350
-SPRINT_REFRESH_SECONDS = 3.0
+SPRINT_REFRESH_SECONDS = 0.5
 BFS_GOAL_SEARCH_RADIUS = 18
 PATH_AVOID_CELL_MEMORY_SECONDS = 6.0
 PATH_AVOID_NEIGHBOR_RADIUS = 3
 MAX_RECENT_CHAT_MESSAGES = 16
 JUMP_SUPPRESS_ENEMY_RADIUS = 8.0
-REPATH_SAME_GOAL_SECONDS = 0
+REPATH_SAME_GOAL_SECONDS = 0.25
 STUCK_MOVEMENT_SECONDS = 0.45
 STUCK_PROGRESS_EPSILON = 0.3
 STUCK_RECOVERY_COOLDOWN_SECONDS = 1.0
@@ -38,6 +38,7 @@ STUCK_RECOVERY_TURN_DISTANCE = 6.0
 STUCK_RECOVERY_ANGLE_DEGREES = 30.0
 LEAF_PATH_BUFFER_RADIUS = 1
 PLAYER_PATH_BUFFER_RADIUS = 2
+ENTITY_PATH_BUFFER_RADIUS = 2
 ROUTE_HAZARD_PADDING = 3
 PRISON_ZONES = {
     "L": {"min_x": -18, "max_x": -14, "min_z": 26, "max_z": 30},
@@ -180,6 +181,8 @@ class World:
         self._pathfinder: Any | None = None
         self._movements: Any | None = None
         self._fast_movements: Any | None = None
+        self._entity_safe_movements: Any | None = None
+        self._fast_entity_safe_movements: Any | None = None
         self._goal_near: Any | None = None
         self._off: Any | None = None
         self._chat_listener: Any | None = None
@@ -207,7 +210,7 @@ class World:
             player_num=self.player_num,
         )
         self._last_quick_snapshot: dict[str, Any] | None = None
-        self._last_move_goal: tuple[int, int, int, bool] | None = None
+        self._last_move_goal: tuple[int, int, int, bool, bool, bool] | None = None
         self._last_resolved_goal: tuple[int, int, int, int] | None = None
         self._last_move_progress_position: tuple[float, float, float] | None = None
         self._last_move_progress_at = time.monotonic()
@@ -299,7 +302,7 @@ class World:
         pathfinder = getattr(self._bot, "pathfinder", None)
         if pathfinder is None:
             return
-        goal_signature = (action.x, action.z, action.radius, action.sprint, action.jump)
+        goal_signature = (action.x, action.z, action.radius, action.sprint, action.jump, action.avoid_entities)
         try:
             current_position = _current_bot_position(self._bot)
             self._update_move_progress(current_position)
@@ -312,11 +315,18 @@ class World:
                 jump=action.jump,
             )
             self._last_sprint_refresh_at = now
-            movements = (
-                self._fast_movements
-                if action.sprint and self._fast_movements is not None
-                else self._movements
-            )
+            if action.avoid_entities:
+                movements = (
+                    self._fast_entity_safe_movements
+                    if action.sprint and self._fast_entity_safe_movements is not None
+                    else self._entity_safe_movements
+                )
+            else:
+                movements = (
+                    self._fast_movements
+                    if action.sprint and self._fast_movements is not None
+                    else self._movements
+                )
             if getattr(pathfinder, "movements", None) is not movements:
                 pathfinder.setMovements(movements)
             if now >= self._stuck_recovery_until and self._maybe_recover_from_stuck(
@@ -324,6 +334,12 @@ class World:
                 pathfinder,
                 current_position,
                 observation,
+            ):
+                return
+            if (
+                self._last_move_goal == goal_signature
+                and self._last_resolved_goal is not None
+                and (now - self._last_goal_set_at) < REPATH_SAME_GOAL_SECONDS
             ):
                 return
             goal_y = _current_goal_y(self._bot)
@@ -423,6 +439,7 @@ class World:
         )
 
         while not self._game_ended:
+            loop_started_at = time.monotonic()
             try:
                 delta_snapshot = self.quick_observe()
                 current_observation.patch_observation(delta_snapshot).validate()
@@ -452,7 +469,8 @@ class World:
                 )
                 previous_dynamic_state = current_dynamic_state
                 next_snapshot_at = now + snapshot_tick_seconds
-            time.sleep(action_tick_seconds)
+            elapsed = time.monotonic() - loop_started_at
+            time.sleep(max(0.0, action_tick_seconds - elapsed))
 
         self._append_log_line(
             log_path,
@@ -514,6 +532,8 @@ class World:
         self._pathfinder = None
         self._movements = None
         self._fast_movements = None
+        self._entity_safe_movements = None
+        self._fast_entity_safe_movements = None
         self._goal_near = None
         self._off = None
         self._chat_listener = None
@@ -620,6 +640,8 @@ class World:
         self._movements = pathfinder.Movements(bot, mc_data)
         _apply_leaf_avoidance(self._movements, mc_data)
         self._fast_movements = _build_fast_movements(pathfinder, bot, mc_data)
+        self._entity_safe_movements = _build_entity_safe_movements(pathfinder, bot, mc_data, sprint=False)
+        self._fast_entity_safe_movements = _build_entity_safe_movements(pathfinder, bot, mc_data, sprint=True)
         self._goal_near = pathfinder.goals.GoalNear
         return bot
 
@@ -872,6 +894,21 @@ class World:
                     pathfinder.setGoal(None)
                 except Exception:
                     pass
+            client = getattr(bot, "_client", None)
+            write_packet = getattr(client, "write", None)
+            if callable(write_packet):
+                try:
+                    write_packet(
+                        "position",
+                        {
+                            "x": float(x),
+                            "y": float(y),
+                            "z": float(z),
+                            "onGround": True,
+                        },
+                    )
+                except Exception:
+                    pass
             # Update local entity state so physics loop sends new position
             bot.entity.position.set(x, y, z)
             bot.entity.velocity.set(0, 0, 0)
@@ -1036,6 +1073,17 @@ class World:
             if not _cell_in_route_bounds(enemy_position.x, enemy_position.z, route_bounds):
                 continue
             _add_buffered_cell(avoid_cells, enemy_position.x, enemy_position.z, PLAYER_PATH_BUFFER_RADIUS)
+        if action.avoid_entities:
+            for entity in observation.entities:
+                if entity.username == self.bot_name:
+                    continue
+                entity_position = entity.grid_position
+                if not _cell_in_route_bounds(entity_position.x, entity_position.z, route_bounds):
+                    continue
+                entity_y = int(math.floor(entity.position.y))
+                if abs(entity_y - goal_y) > 1:
+                    continue
+                _add_buffered_cell(avoid_cells, entity_position.x, entity_position.z, ENTITY_PATH_BUFFER_RADIUS)
         return frozenset(avoid_cells)
 
     def _has_close_active_enemy(
@@ -1255,6 +1303,7 @@ def _serialize_action(action: Action) -> dict[str, Any]:
             "radius": action.radius,
             "sprint": action.sprint,
             "jump": action.jump,
+            "avoid_entities": action.avoid_entities,
         }
     if isinstance(action, DashTo):
         return {
@@ -1289,6 +1338,16 @@ def _build_fast_movements(pathfinder: Any, bot: Any, mc_data: Any) -> Any:
     _set_optional_attr(movements, "dontCreateFlow", True)
     _clear_optional_mapping(movements, "entityIntersections")
     _apply_leaf_avoidance(movements, mc_data)
+    return movements
+
+
+def _build_entity_safe_movements(pathfinder: Any, bot: Any, mc_data: Any, *, sprint: bool) -> Any:
+    movements = _build_fast_movements(pathfinder, bot, mc_data) if sprint else pathfinder.Movements(bot, mc_data)
+    if not sprint:
+        _apply_leaf_avoidance(movements, mc_data)
+    _set_optional_attr(movements, "allowEntityDetection", True)
+    _set_optional_attr(movements, "entityCost", FAST_PATHFINDER_COST_MULTIPLIER * 8)
+    _set_optional_attr(movements, "allowFreeMotion", False)
     return movements
 
 

@@ -62,8 +62,17 @@ def _nearest_enemy_dist(pos: GridPosition, enemies: tuple[PlayerState, ...]) -> 
     return min(_manhattan(pos, e.position) for e in enemies)
 
 
-def _go(actions: list, dest: GridPosition, radius: int = 1) -> None:
-    actions.append(MoveTo(x=dest.x, z=dest.z, radius=radius, sprint=True))
+def _go(actions: list, dest: GridPosition, radius: int = 0, *, avoid_entities: bool = False) -> None:
+    actions.append(
+        MoveTo(
+            x=dest.x,
+            z=dest.z,
+            radius=radius,
+            sprint=True,
+            jump=True,
+            avoid_entities=avoid_entities,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -113,13 +122,13 @@ class ForsakenStrategy:
 
         # --- 2. Carrying flag: sprint straight home ---
         if me.has_flag:
-            gold = obs.gold_block_positions
-            if gold:
-                home = min(gold, key=lambda g: _manhattan(my_pos, g))
-                _go(actions, home, radius=0)
+            home_targets = tuple(block.grid_position for block in obs.my_targets)
+            if home_targets:
+                home = min(home_targets, key=lambda target: _manhattan(my_pos, target))
+                _go(actions, home, radius=0, avoid_entities=True)
             else:
                 home_x = -18 if my_team == "L" else 18
-                _go(actions, GridPosition(x=home_x, z=0), radius=1)
+                _go(actions, GridPosition(x=home_x, z=0), radius=1, avoid_entities=True)
             return actions
 
         # --- 3. Tag intruders ---
