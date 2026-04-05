@@ -21,13 +21,24 @@ ONLINE_WAIT_TIMEOUT_SECONDS = 30.0
 DEFAULT_LOG_DIR = Path("logs")
 FAST_PATHFINDER_MAX_DROP_DOWN = 4
 FAST_PATHFINDER_COST_MULTIPLIER = 8
-SPRINT_REFRESH_SECONDS = 1.0
-BFS_GOAL_SEARCH_RADIUS = 6
-STUCK_MOVEMENT_SECONDS = 1.5
-STUCK_PROGRESS_EPSILON = 0.75
+SPRINT_REFRESH_SECONDS = 3.0
+BFS_GOAL_SEARCH_RADIUS = 10
+PATH_AVOID_CELL_MEMORY_SECONDS = 6.0
+PATH_AVOID_NEIGHBOR_RADIUS = 2
+MAX_RECENT_CHAT_MESSAGES = 16
+JUMP_SUPPRESS_ENEMY_RADIUS = 8.0
+STUCK_MOVEMENT_SECONDS = 0.9
+STUCK_PROGRESS_EPSILON = 0.45
 STUCK_RECOVERY_COOLDOWN_SECONDS = 1.5
-STUCK_RECOVERY_TURN_DISTANCE = 3.0
+STUCK_RECOVERY_TURN_DISTANCE = 5.0
 STUCK_RECOVERY_ANGLE_DEGREES = 30.0
+LEAF_PATH_BUFFER_RADIUS = 1
+ANIMAL_PATH_BUFFER_RADIUS = 1
+ROUTE_HAZARD_PADDING = 3
+PRISON_ZONES = {
+    "L": {"min_x": -18, "max_x": -14, "min_z": 26, "max_z": 30},
+    "R": {"min_x": 14, "max_x": 18, "min_z": 26, "max_z": 30},
+}
 LEAF_BLOCK_NAMES = (
     "oak_leaves",
     "spruce_leaves",
@@ -172,6 +183,9 @@ class World:
         self._message_object_listener: Any | None = None
         self._spawn_listener: Any | None = None
         self._respawn_listener: Any | None = None
+        self._end_listener: Any | None = None
+        self._kicked_listener: Any | None = None
+        self._error_listener: Any | None = None
         self._listeners_installed = False
         self._ready_observation: Observation | None = None
         self._intent_announced = False
@@ -182,6 +196,7 @@ class World:
         self._match_world_detected = False
         self._game_started = False
         self._game_ended = False
+        self._disconnect_reason: str | None = None
         self._game_start_event = threading.Event()
         self._active_log_path: Path = build_multi_log_path(
             team_num=self.team_num,
@@ -193,6 +208,8 @@ class World:
         self._last_move_progress_at = time.monotonic()
         self._stuck_recovery_until = 0.0
         self._last_sprint_refresh_at = 0.0
+        self._recent_messages: deque[str] = deque(maxlen=MAX_RECENT_CHAT_MESSAGES)
+        self._temporary_avoid_cells: dict[tuple[int, int], float] = {}
 
     def join_the_world(self) -> Any:
         self._log("Start joining the world...")
@@ -257,7 +274,7 @@ class World:
         self._last_quick_snapshot = snapshot
         return delta_snapshot
 
-    def execute_action(self, action: Action) -> None:
+    def execute_action(self, action: Action, observation: Observation | None = None) -> None:
         if self._game_ended:
             return
         if isinstance(action, Chat):
@@ -292,11 +309,24 @@ class World:
             if now < self._stuck_recovery_until:
                 return
             if self._last_move_goal == goal_signature:
-                if self._maybe_recover_from_stuck(action, pathfinder, current_position):
+                if self._maybe_recover_from_stuck(action, pathfinder, current_position, observation):
                     return
                 return
             goal_y = _current_goal_y(self._bot)
-            goal_x, goal_y, goal_z = _resolve_bfs_goal(self._bot, action, goal_y)
+            self._expire_temporary_avoid_cells(now)
+            avoid_cells = self._build_hazard_avoid_cells(
+                observation,
+                action,
+                goal_y,
+                current_position=current_position,
+            )
+            goal_x, goal_y, goal_z = _resolve_bfs_goal(
+                self._bot,
+                action,
+                goal_y,
+                current_position=current_position,
+                avoid_cells=avoid_cells,
+            )
             pathfinder.setGoal(self._goal_near(goal_x, goal_y, goal_z, action.radius))
             self._last_move_goal = goal_signature
             self._stuck_recovery_until = 0.0
@@ -304,14 +334,18 @@ class World:
         except Exception:
             return
 
-    def execute_actions(self, actions: Action | Iterable[Action] | None) -> None:
+    def execute_actions(
+        self,
+        actions: Action | Iterable[Action] | None,
+        observation: Observation | None = None,
+    ) -> None:
         if actions is None:
             return
         if isinstance(actions, (MoveTo, Chat)):
-            self.execute_action(actions)
+            self.execute_action(actions, observation)
             return
         for action in actions:
-            self.execute_action(action)
+            self.execute_action(action, observation)
 
     def stop_actions(self) -> None:
         if self._bot is None or not hasattr(self._bot, "pathfinder"):
@@ -374,14 +408,16 @@ class World:
             try:
                 delta_snapshot = self.quick_observe()
                 current_observation.patch_observation(delta_snapshot).validate()
+                object.__setattr__(current_observation, "recent_messages", tuple(self._recent_messages))
             except Exception:
                 self._log("Failed to perform quick observe. Doing full observe instead.")
                 current_observation = self.observe()
+                object.__setattr__(current_observation, "recent_messages", tuple(self._recent_messages))
                 self._last_quick_snapshot = None
 
             actions = strategy.compute_next_action(current_observation)
             try:
-                self.execute_actions(actions)
+                self.execute_actions(actions, current_observation)
             except Exception:
                 pass
             now = time.monotonic()
@@ -407,6 +443,7 @@ class World:
                 "timestamp": time.time(),
                 "bot_name": self.bot_name,
                 "team": self.team,
+                "disconnect_reason": self._disconnect_reason,
             },
         )
 
@@ -417,6 +454,7 @@ class World:
 
     def close(self) -> None:
         if self._bot is None:
+            self._release_js_references()
             return
         try:
             self._remove_game_start_listeners()
@@ -435,9 +473,34 @@ class World:
             self._ready_announced = False
             self._game_started = False
             self._game_ended = False
+            self._disconnect_reason = None
             self._game_start_event.clear()
             self._last_quick_snapshot = None
             self._last_move_goal = None
+            self._recent_messages.clear()
+            self._temporary_avoid_cells.clear()
+            self._release_js_references()
+
+    def _release_js_references(self) -> None:
+        self._js_bridge = None
+        self._require = None
+        self._block_to_json = None
+        self._entities_to_json = None
+        self._players_to_json = None
+        self._quick_snapshot_to_json = None
+        self._position_to_json = None
+        self._team_info_to_json = None
+        self._vec3 = None
+        self._pathfinder = None
+        self._movements = None
+        self._fast_movements = None
+        self._goal_near = None
+        self._off = None
+        self._chat_listener = None
+        self._message_listener = None
+        self._message_object_listener = None
+        self._spawn_listener = None
+        self._respawn_listener = None
 
     def _capture_snapshot(self) -> dict[str, Any]:
         if self._bot is None or self._vec3 is None:
@@ -603,11 +666,26 @@ class World:
         def _on_respawn(*_args):
             self._handle_world_transition("respawn")
 
+        @On(self._bot, "end")
+        def _on_end(*args):
+            self._handle_disconnect("end", *args)
+
+        @On(self._bot, "kicked")
+        def _on_kicked(*args):
+            self._handle_disconnect("kicked", *args)
+
+        @On(self._bot, "error")
+        def _on_error(*args):
+            self._handle_disconnect("error", *args)
+
         self._message_listener = _on_messagestr
         self._chat_listener = _on_chat
         self._message_object_listener = _on_message
         self._spawn_listener = _on_spawn
         self._respawn_listener = _on_respawn
+        self._end_listener = _on_end
+        self._kicked_listener = _on_kicked
+        self._error_listener = _on_error
         self._listeners_installed = True
 
     def _remove_game_start_listeners(self) -> None:
@@ -624,6 +702,12 @@ class World:
                 self._off(self._bot, "spawn", self._spawn_listener)
             if self._respawn_listener is not None:
                 self._off(self._bot, "respawn", self._respawn_listener)
+            if self._end_listener is not None:
+                self._off(self._bot, "end", self._end_listener)
+            if self._kicked_listener is not None:
+                self._off(self._bot, "kicked", self._kicked_listener)
+            if self._error_listener is not None:
+                self._off(self._bot, "error", self._error_listener)
         except Exception:
             pass
         finally:
@@ -632,6 +716,9 @@ class World:
             self._message_object_listener = None
             self._spawn_listener = None
             self._respawn_listener = None
+            self._end_listener = None
+            self._kicked_listener = None
+            self._error_listener = None
             self._listeners_installed = False
 
     def _wait_for_expected_players(self) -> None:
@@ -680,6 +767,7 @@ class World:
 
         if combined:
             self._log(f"Incoming message: {combined}")
+            self._recent_messages.append(combined)
 
         if "Are you ready?" in combined:
             self._ready_prompt_received = True
@@ -712,6 +800,16 @@ class World:
         self._ready_prompt_received = True
         self._ready_prompt_event.set()
         self._log(f"Detected world transition via {source}; treating it as readiness phase.")
+
+    def _handle_disconnect(self, source: str, *args: Any) -> None:
+        rendered_args = [text for text in (_coerce_message_text(arg).strip() for arg in args) if text]
+        detail = " | ".join(rendered_args) if rendered_args else source
+        self._disconnect_reason = detail
+        self._game_ended = True
+        self._ready_prompt_event.set()
+        self._game_start_event.set()
+        self.stop_actions()
+        self._log(f"Bot connection ended via {source}: {detail}")
 
     def _announce_intent(self) -> None:
         self._intent_announced = self._safe_chat(self.intent_message) or self._intent_announced
@@ -774,12 +872,25 @@ class World:
         action: MoveTo,
         pathfinder: Any,
         current_position: tuple[float, float, float] | None,
+        observation: Observation | None = None,
     ) -> bool:
         if current_position is None:
             return False
         if time.monotonic() - self._last_move_progress_at < STUCK_MOVEMENT_SECONDS:
             return False
-        recovery_goal = _compute_recovery_goal(current_position, action)
+        self._remember_avoidance_cells(current_position, action)
+        avoid_cells = self._build_hazard_avoid_cells(
+            observation,
+            action,
+            _current_goal_y(self._bot),
+            current_position=current_position,
+        )
+        recovery_goal = _compute_recovery_goal(
+            self._bot,
+            current_position,
+            action,
+            avoid_cells=avoid_cells,
+        )
         if recovery_goal is None:
             return False
         recovery_x, recovery_y, recovery_z = recovery_goal
@@ -793,6 +904,94 @@ class World:
             f"({recovery_x}, {recovery_z}) before retrying target ({action.x}, {action.z})."
         )
         return True
+
+    def _remember_avoidance_cells(
+        self,
+        current_position: tuple[float, float, float],
+        action: MoveTo,
+    ) -> None:
+        expiry = time.monotonic() + PATH_AVOID_CELL_MEMORY_SECONDS
+        cx = int(round(current_position[0]))
+        cz = int(round(current_position[2]))
+        for dx in range(-PATH_AVOID_NEIGHBOR_RADIUS, PATH_AVOID_NEIGHBOR_RADIUS + 1):
+            for dz in range(-PATH_AVOID_NEIGHBOR_RADIUS, PATH_AVOID_NEIGHBOR_RADIUS + 1):
+                self._temporary_avoid_cells[(cx + dx, cz + dz)] = expiry
+        self._temporary_avoid_cells[(int(action.x), int(action.z))] = expiry
+
+    def _expire_temporary_avoid_cells(self, now: float) -> None:
+        expired = [cell for cell, expiry in self._temporary_avoid_cells.items() if expiry <= now]
+        for cell in expired:
+            self._temporary_avoid_cells.pop(cell, None)
+
+    def _build_hazard_avoid_cells(
+        self,
+        observation: Observation | None,
+        action: MoveTo,
+        goal_y: int,
+        *,
+        current_position: tuple[float, float, float] | None,
+    ) -> frozenset[tuple[int, int]]:
+        avoid_cells = set(self._temporary_avoid_cells)
+        if observation is None:
+            return frozenset(avoid_cells)
+        route_bounds = _build_route_bounds(current_position, action)
+        for block in observation.blocks:
+            if block.name not in LEAF_BLOCK_NAMES:
+                continue
+            block_position = block.grid_position
+            if not _cell_in_route_bounds(block_position.x, block_position.z, route_bounds):
+                continue
+            block_y = int(math.floor(block.position.y))
+            if abs(block_y - goal_y) > 1:
+                continue
+            _add_buffered_cell(avoid_cells, block_position.x, block_position.z, LEAF_PATH_BUFFER_RADIUS)
+        for entity in observation.entities:
+            if entity.entity_type != "animal":
+                continue
+            entity_position = entity.grid_position
+            if not _cell_in_route_bounds(entity_position.x, entity_position.z, route_bounds):
+                continue
+            _add_buffered_cell(avoid_cells, entity_position.x, entity_position.z, ANIMAL_PATH_BUFFER_RADIUS)
+        return frozenset(avoid_cells)
+
+    def _has_close_active_enemy(
+        self,
+        current_position: tuple[float, float, float] | None,
+    ) -> bool:
+        if current_position is None or self._bot is None or self._players_to_json is None:
+            return False
+        my_team = self.team or self._assigned_teams.get(self.bot_name)
+        if my_team is None:
+            return False
+        try:
+            players_payload = json.loads(self._players_to_json(self._bot))
+        except Exception:
+            return False
+        if not isinstance(players_payload, list):
+            return False
+
+        for player in players_payload:
+            if not isinstance(player, dict):
+                continue
+            username = player.get("username")
+            if not isinstance(username, str) or username == self.bot_name:
+                continue
+            player_team = _resolve_runtime_player_team(player, username=username, assigned_teams=self._assigned_teams)
+            if player_team is None or player_team == my_team:
+                continue
+            position = player.get("position")
+            if not isinstance(position, dict):
+                continue
+            try:
+                enemy_x = float(position["x"])
+                enemy_z = float(position["z"])
+            except Exception:
+                continue
+            if _is_runtime_player_in_prison(enemy_x, enemy_z, player_team):
+                continue
+            if math.hypot(enemy_x - current_position[0], enemy_z - current_position[2]) < JUMP_SUPPRESS_ENEMY_RADIUS:
+                return True
+        return False
 
 
 def _normalize_bot_name(*, team_num: int, player_num: int | str) -> str:
@@ -988,7 +1187,7 @@ def _build_fast_movements(pathfinder: Any, bot: Any, mc_data: Any) -> Any:
     _set_optional_attr(movements, "placeCost", FAST_PATHFINDER_COST_MULTIPLIER)
     _set_optional_attr(movements, "digCost", FAST_PATHFINDER_COST_MULTIPLIER)
     _set_optional_attr(movements, "liquidCost", FAST_PATHFINDER_COST_MULTIPLIER)
-    _set_optional_attr(movements, "entityCost", FAST_PATHFINDER_COST_MULTIPLIER)
+    _set_optional_attr(movements, "entityCost", FAST_PATHFINDER_COST_MULTIPLIER * 3)
     _set_optional_attr(movements, "dontCreateFlow", True)
     _clear_optional_mapping(movements, "entityIntersections")
     _apply_leaf_avoidance(movements, mc_data)
@@ -1020,6 +1219,38 @@ def _collect_leaf_block_ids(mc_data: Any) -> tuple[int, ...]:
     return tuple(dict.fromkeys(block_ids))
 
 
+def _build_route_bounds(
+    current_position: tuple[float, float, float] | None,
+    action: MoveTo,
+) -> tuple[int, int, int, int]:
+    current_x = int(round(current_position[0])) if current_position is not None else int(action.x)
+    current_z = int(round(current_position[2])) if current_position is not None else int(action.z)
+    target_x = int(action.x)
+    target_z = int(action.z)
+    return (
+        min(current_x, target_x) - ROUTE_HAZARD_PADDING,
+        max(current_x, target_x) + ROUTE_HAZARD_PADDING,
+        min(current_z, target_z) - ROUTE_HAZARD_PADDING,
+        max(current_z, target_z) + ROUTE_HAZARD_PADDING,
+    )
+
+
+def _cell_in_route_bounds(x: int, z: int, bounds: tuple[int, int, int, int]) -> bool:
+    min_x, max_x, min_z, max_z = bounds
+    return min_x <= x <= max_x and min_z <= z <= max_z
+
+
+def _add_buffered_cell(
+    cells: set[tuple[int, int]],
+    x: int,
+    z: int,
+    radius: int,
+) -> None:
+    for dx in range(-radius, radius + 1):
+        for dz in range(-radius, radius + 1):
+            cells.add((x + dx, z + dz))
+
+
 def _current_goal_y(bot: Any) -> int:
     position = getattr(getattr(bot, "entity", None), "position", None)
     y = getattr(position, "y", 1)
@@ -1041,10 +1272,25 @@ def _current_bot_position(bot: Any) -> tuple[float, float, float] | None:
     return (float(x), float(y), float(z))
 
 
-def _resolve_bfs_goal(bot: Any, action: MoveTo, goal_y: int) -> tuple[int, int, int]:
+def _resolve_bfs_goal(
+    bot: Any,
+    action: MoveTo,
+    goal_y: int,
+    *,
+    current_position: tuple[float, float, float] | None = None,
+    avoid_cells: frozenset[tuple[int, int]] = frozenset(),
+) -> tuple[int, int, int]:
     target_x = int(action.x)
     target_z = int(action.z)
-    resolved = _find_nearest_safe_goal(bot, target_x, goal_y, target_z, BFS_GOAL_SEARCH_RADIUS)
+    resolved = _find_nearest_safe_goal(
+        bot,
+        target_x,
+        goal_y,
+        target_z,
+        BFS_GOAL_SEARCH_RADIUS,
+        current_position=current_position,
+        avoid_cells=avoid_cells,
+    )
     if resolved is not None:
         return resolved
     return (target_x, goal_y, target_z)
@@ -1056,14 +1302,22 @@ def _find_nearest_safe_goal(
     goal_y: int,
     target_z: int,
     search_radius: int,
+    *,
+    current_position: tuple[float, float, float] | None = None,
+    avoid_cells: frozenset[tuple[int, int]] = frozenset(),
 ) -> tuple[int, int, int] | None:
     start = (target_x, target_z)
     queue: deque[tuple[int, int]] = deque((start,))
     visited = {start}
+    best_candidate: tuple[int, int, int] | None = None
+    best_score = float("inf")
     while queue:
         x, z = queue.popleft()
-        if _is_safe_goal_cell(bot, x, goal_y, z):
-            return (x, goal_y, z)
+        if _is_safe_goal_cell(bot, x, goal_y, z, avoid_cells=avoid_cells):
+            score = _goal_cell_score(bot, x, goal_y, z, target_x, target_z, current_position, avoid_cells)
+            if score < best_score:
+                best_score = score
+                best_candidate = (x, goal_y, z)
         for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             nx = x + dx
             nz = z + dz
@@ -1074,15 +1328,43 @@ def _find_nearest_safe_goal(
                 continue
             visited.add(candidate)
             queue.append(candidate)
-    return None
+    return best_candidate
 
 
-def _is_safe_goal_cell(bot: Any, x: int, goal_y: int, z: int) -> bool:
+def _is_safe_goal_cell(
+    bot: Any,
+    x: int,
+    goal_y: int,
+    z: int,
+    *,
+    avoid_cells: frozenset[tuple[int, int]] = frozenset(),
+) -> bool:
+    if (x, z) in avoid_cells:
+        return False
     if not _is_walkable_cell(bot, x, goal_y, z):
         return False
     if _is_diagonal_pinched(bot, x, goal_y, z):
         return False
-    return _cell_clearance_score(bot, x, goal_y, z) >= 1
+    return _cell_clearance_score(bot, x, goal_y, z) >= 2
+
+
+def _goal_cell_score(
+    bot: Any,
+    x: int,
+    goal_y: int,
+    z: int,
+    target_x: int,
+    target_z: int,
+    current_position: tuple[float, float, float] | None,
+    avoid_cells: frozenset[tuple[int, int]],
+) -> float:
+    clearance = _cell_clearance_score(bot, x, goal_y, z)
+    target_distance = abs(x - target_x) + abs(z - target_z)
+    current_distance = 0.0
+    if current_position is not None:
+        current_distance = abs(x - current_position[0]) + abs(z - current_position[2])
+    avoidance_penalty = 100.0 if (x, z) in avoid_cells else 0.0
+    return (target_distance * 4.0) + current_distance - (clearance * 3.0) + avoidance_penalty
 
 
 def _cell_clearance_score(bot: Any, x: int, goal_y: int, z: int) -> int:
@@ -1167,8 +1449,11 @@ def _horizontal_distance(
 
 
 def _compute_recovery_goal(
+    bot: Any,
     current_position: tuple[float, float, float],
     action: MoveTo,
+    *,
+    avoid_cells: frozenset[tuple[int, int]] = frozenset(),
 ) -> tuple[int, int, int] | None:
     current_x, current_y, current_z = current_position
     delta_x = float(action.x) - current_x
@@ -1176,13 +1461,35 @@ def _compute_recovery_goal(
     magnitude = (delta_x * delta_x + delta_z * delta_z) ** 0.5
     if magnitude < 0.001:
         return None
-    opposite_angle = math.atan2(-delta_z, -delta_x)
-    angle_offset = math.radians(random.uniform(-STUCK_RECOVERY_ANGLE_DEGREES, STUCK_RECOVERY_ANGLE_DEGREES))
-    recovery_angle = opposite_angle + angle_offset
-    recovery_x = int(round(current_x + math.cos(recovery_angle) * STUCK_RECOVERY_TURN_DISTANCE))
-    recovery_z = int(round(current_z + math.sin(recovery_angle) * STUCK_RECOVERY_TURN_DISTANCE))
+    forward_angle = math.atan2(delta_z, delta_x)
+    candidate_angles = (
+        forward_angle + math.pi / 2,
+        forward_angle - math.pi / 2,
+        forward_angle + math.pi,
+        forward_angle + math.radians(random.uniform(-STUCK_RECOVERY_ANGLE_DEGREES, STUCK_RECOVERY_ANGLE_DEGREES)),
+    )
     recovery_y = int(round(current_y))
-    return (recovery_x, recovery_y, recovery_z)
+    candidates: list[tuple[float, tuple[int, int, int]]] = []
+    for angle in candidate_angles:
+        recovery_x = int(round(current_x + math.cos(angle) * STUCK_RECOVERY_TURN_DISTANCE))
+        recovery_z = int(round(current_z + math.sin(angle) * STUCK_RECOVERY_TURN_DISTANCE))
+        if not _is_safe_goal_cell(bot, recovery_x, recovery_y, recovery_z, avoid_cells=avoid_cells):
+            continue
+        score = _goal_cell_score(
+            bot,
+            recovery_x,
+            recovery_y,
+            recovery_z,
+            int(action.x),
+            int(action.z),
+            current_position,
+            avoid_cells,
+        )
+        candidates.append((score, (recovery_x, recovery_y, recovery_z)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
 
 
 def _set_optional_attr(target: Any, name: str, value: Any) -> None:
@@ -1230,7 +1537,28 @@ def _refresh_sprint_jump_state(
         _set_control_state(bot, "sprint", False)
         _set_control_state(bot, "jump", False)
     _set_control_state(bot, "sprint", True)
-    _set_control_state(bot, "jump", True)
+    _set_control_state(bot, "jump", False)
+
+
+def _resolve_runtime_player_team(
+    player_payload: Mapping[str, Any],
+    *,
+    username: str,
+    assigned_teams: Mapping[str, TeamName],
+) -> TeamName | None:
+    assigned_team = assigned_teams.get(username)
+    if assigned_team is not None:
+        return assigned_team
+    for key in ("team", "playerTeam", "scoreboardTeam"):
+        normalized = normalize_team_name(player_payload.get(key))
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def _is_runtime_player_in_prison(x: float, z: float, team: TeamName) -> bool:
+    zone = PRISON_ZONES[team]
+    return zone["min_x"] <= x <= zone["max_x"] and zone["min_z"] <= z <= zone["max_z"]
 
 
 def _build_dynamic_state(

@@ -330,6 +330,7 @@ class Observation:
     flags_to_protect: tuple[BlockState, ...]
     map: MapMetadata
     assigned_teams: tuple[tuple[str, TeamName], ...] = ()
+    recent_messages: tuple[str, ...] = ()
     scores: Scoreboard = field(default_factory=Scoreboard)
 
     @property
@@ -390,6 +391,7 @@ class Observation:
             "flags_to_protect": [flag.to_dict() for flag in self.flags_to_protect],
             "map": self.map.to_dict(),
             "assigned_teams": dict(self.assigned_teams),
+            "recent_messages": list(self.recent_messages),
             "scores": {"L": self.scores.L, "R": self.scores.R},
         }
 
@@ -490,6 +492,12 @@ class Observation:
         object.__setattr__(self, "flags_to_capture", flags_to_capture)
         object.__setattr__(self, "flags_to_protect", flags_to_protect)
         object.__setattr__(self, "assigned_teams", tuple(sorted(assigned_teams.items())))
+        if "recent_messages" in delta_snapshot:
+            object.__setattr__(
+                self,
+                "recent_messages",
+                tuple(str(message) for message in delta_snapshot.get("recent_messages", ())),
+            )
         return self
 
     @classmethod
@@ -532,6 +540,7 @@ class Observation:
             assigned_teams=tuple(
                 sorted(_normalize_assigned_teams(payload.get("assigned_teams")).items())
             ),
+            recent_messages=tuple(str(message) for message in payload.get("recent_messages", [])),
             scores=Scoreboard.from_dict(payload.get("scores", {})),
         )
 
@@ -667,6 +676,7 @@ class Observation:
             flags_to_protect=flags_to_protect,
             map=metadata,
             assigned_teams=tuple(sorted(normalized_assigned_teams.items())),
+            recent_messages=(),
         )
 
 

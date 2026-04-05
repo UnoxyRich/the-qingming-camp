@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import importlib
 import json
 import sys
@@ -103,7 +104,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     js_runtime: Any | None = None
+    js_bridge: JavaScriptBridge | None = None
     world: World | None = None
+    strategy: Any | None = None
+    final_observation: Any | None = None
     run_time = datetime.now()
     multi_log_path = build_multi_log_path(
         team_num=args.team_num,
@@ -150,6 +154,11 @@ def main() -> int:
     finally:
         if world is not None:
             world.close()
+        final_observation = None
+        strategy = None
+        world = None
+        js_bridge = None
+        gc.collect()
         if js_runtime is not None:
             try:
                 js_runtime.terminate()
