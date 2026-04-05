@@ -1,5 +1,6 @@
 param(
     [string]$TeamNum = "",
+    [string]$AgainstTeam = "random",
     [int]$PerTeamPlayer = 2,
     [ValidateSet("fixed", "random")]
     [string]$MapMode = "random",
@@ -16,6 +17,16 @@ $env:PYTHONIOENCODING = "utf-8"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+function Test-AgainstTeamValue {
+    param([string]$Value)
+
+    if ($Value -in @("none", "random")) {
+        return $true
+    }
+
+    return $Value -match '^[0-9]+$'
+}
+
 function New-RandomMemberTag {
     param([string[]]$Exclude = @())
 
@@ -26,6 +37,10 @@ function New-RandomMemberTag {
 
 function New-RandomTeamNumber {
     return "$(Get-Random -Minimum 100 -Maximum 1000)"
+}
+
+if (-not (Test-AgainstTeamValue -Value $AgainstTeam)) {
+    throw "AgainstTeam must be one of: none, random, or a numeric team id."
 }
 
 if (-not $TeamNum) {
@@ -55,7 +70,7 @@ $botSpecs = @(
             "--my-team", "$TeamNum",
             "--my-no", "$FollowerName",
             "--username", "$followerUsername",
-            "--against", "random",
+            "--against", "$AgainstTeam",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
             "--strategy", "ctf_strategy.AttackerStrategy",
@@ -70,7 +85,7 @@ $botSpecs = @(
             "--my-team", "$TeamNum",
             "--my-no", "$LeaderName",
             "--username", "$leaderUsername",
-            "--against", "random",
+            "--against", "$AgainstTeam",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
             "--strategy", "ctf_strategy.AttackerStrategy",
@@ -89,7 +104,7 @@ foreach ($bot in $botSpecs) {
 
 Write-Host ("Using random team number: {0}" -f $TeamNum)
 Write-Host ("Using bot names: leader={0}, follower={1}" -f $leaderUsername, $followerUsername)
-Write-Host "Opponent selection: random team from server"
+Write-Host ("Intent chat: with {0} {1} {2}" -f $AgainstTeam, $PerTeamPlayer, $MapMode)
 
 if ($DryRun) {
     exit 0

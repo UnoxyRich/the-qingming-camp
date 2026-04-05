@@ -22,14 +22,15 @@ DEFAULT_LOG_DIR = Path("logs")
 FAST_PATHFINDER_MAX_DROP_DOWN = 4
 FAST_PATHFINDER_COST_MULTIPLIER = 8
 SPRINT_REFRESH_SECONDS = 3.0
-BFS_GOAL_SEARCH_RADIUS = 6
-STUCK_MOVEMENT_SECONDS = 3.0
-STUCK_PROGRESS_EPSILON = 0.75
+BFS_GOAL_SEARCH_RADIUS = 14
+REPATH_SAME_GOAL_SECONDS = 0
+STUCK_MOVEMENT_SECONDS = 0.6
+STUCK_PROGRESS_EPSILON = 0.3
 STUCK_RECOVERY_COOLDOWN_SECONDS = 1.5
-STUCK_RECOVERY_TURN_DISTANCE = 3.0
+STUCK_RECOVERY_TURN_DISTANCE = 5.0
 STUCK_RECOVERY_ANGLE_DEGREES = 30.0
 LEAF_PATH_BUFFER_RADIUS = 1
-ANIMAL_PATH_BUFFER_RADIUS = 1
+PLAYER_PATH_BUFFER_RADIUS = 2
 ROUTE_HAZARD_PADDING = 3
 LEAF_BLOCK_NAMES = (
     "oak_leaves",
@@ -124,7 +125,7 @@ class World:
         announce_intent: bool = True,
         expected_online_users: Iterable[str] | None = None,
         online_wait_timeout: float = ONLINE_WAIT_TIMEOUT_SECONDS,
-        settle_seconds: float = 1.0,
+        settle_seconds: float = 0.3,
         bounds: ScanBounds | None = None,
     ) -> None:
         self._js_bridge = js_bridge
@@ -196,8 +197,10 @@ class World:
         )
         self._last_quick_snapshot: dict[str, Any] | None = None
         self._last_move_goal: tuple[int, int, int, bool] | None = None
+        self._last_resolved_goal: tuple[int, int, int, int] | None = None
         self._last_move_progress_position: tuple[float, float, float] | None = None
         self._last_move_progress_at = time.monotonic()
+        self._last_goal_set_at = 0.0
         self._stuck_recovery_until = 0.0
         self._last_sprint_refresh_at = 0.0
 
@@ -296,12 +299,6 @@ class World:
             )
             if getattr(pathfinder, "movements", None) is not movements:
                 pathfinder.setMovements(movements)
-            if now < self._stuck_recovery_until:
-                return
-            if self._last_move_goal == goal_signature:
-                if self._maybe_recover_from_stuck(action, pathfinder, current_position, observation):
-                    return
-                return
             goal_y = _current_goal_y(self._bot)
             avoid_cells = self._build_hazard_avoid_cells(
                 observation,
@@ -316,7 +313,10 @@ class World:
                 current_position=current_position,
                 avoid_cells=avoid_cells,
             )
+            resolved_goal = (goal_x, goal_y, goal_z, action.radius)
             pathfinder.setGoal(self._goal_near(goal_x, goal_y, goal_z, action.radius))
+            self._last_goal_set_at = now
+            self._last_resolved_goal = resolved_goal
             self._last_move_goal = goal_signature
             self._stuck_recovery_until = 0.0
             self._update_move_progress(current_position)
@@ -341,8 +341,10 @@ class World:
             return
         try:
             self._last_move_goal = None
+            self._last_resolved_goal = None
             self._last_move_progress_position = None
             self._last_move_progress_at = time.monotonic()
+            self._last_goal_set_at = 0.0
             self._stuck_recovery_until = 0.0
             self._last_sprint_refresh_at = 0.0
             _set_control_state(self._bot, "sprint", False)
@@ -464,6 +466,8 @@ class World:
             self._game_start_event.clear()
             self._last_quick_snapshot = None
             self._last_move_goal = None
+            self._last_resolved_goal = None
+            self._last_goal_set_at = 0.0
             self._release_js_references()
 
     def _release_js_references(self) -> None:
@@ -878,8 +882,10 @@ class World:
         recovery_x, recovery_y, recovery_z = recovery_goal
         pathfinder.setGoal(self._goal_near(recovery_x, recovery_y, recovery_z, max(1, action.radius)))
         self._last_move_goal = None
+        self._last_resolved_goal = (recovery_x, recovery_y, recovery_z, max(1, action.radius))
         self._last_move_progress_position = current_position
         self._last_move_progress_at = time.monotonic()
+        self._last_goal_set_at = time.monotonic()
         self._stuck_recovery_until = time.monotonic() + STUCK_RECOVERY_COOLDOWN_SECONDS
         self._log(
             f"Detected stuck movement for >{STUCK_MOVEMENT_SECONDS:.0f}s; rerouting via "
@@ -909,13 +915,13 @@ class World:
             if abs(block_y - goal_y) > 1:
                 continue
             _add_buffered_cell(avoid_cells, block_position.x, block_position.z, LEAF_PATH_BUFFER_RADIUS)
-        for entity in observation.entities:
-            if entity.entity_type != "animal":
+        for enemy in observation.opponent_players:
+            if enemy.in_prison:
                 continue
-            entity_position = entity.grid_position
-            if not _cell_in_route_bounds(entity_position.x, entity_position.z, route_bounds):
+            enemy_position = enemy.position
+            if not _cell_in_route_bounds(enemy_position.x, enemy_position.z, route_bounds):
                 continue
-            _add_buffered_cell(avoid_cells, entity_position.x, entity_position.z, ANIMAL_PATH_BUFFER_RADIUS)
+            _add_buffered_cell(avoid_cells, enemy_position.x, enemy_position.z, PLAYER_PATH_BUFFER_RADIUS)
         return frozenset(avoid_cells)
 
 
