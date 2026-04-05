@@ -30,6 +30,7 @@ OFFENSE_DETOUR_FORWARD_STEPS = (0, 2, 4)
 OFFENSE_DETOUR_Z_OFFSETS = (0, -6, 6, -10, 10, -14, 14)
 RETREAT_DETOUR_FORWARD_STEPS = (0, 2, 4)
 RETREAT_DETOUR_Z_OFFSETS = (0, -5, 5, -9, 9)
+ROUTE_REFRESH_SECONDS = 1.0
 
 
 def _manhattan(left: GridPosition, right: GridPosition) -> int:
@@ -366,6 +367,7 @@ class RouteState:
     stage: str | None = None
     anchor: GridPosition | None = None
     waypoint: GridPosition | None = None
+    updated_at: float = 0.0
 
     def clear(self) -> None:
         self.mode = None
@@ -373,6 +375,7 @@ class RouteState:
         self.stage = None
         self.anchor = None
         self.waypoint = None
+        self.updated_at = 0.0
 
 
 @dataclass
@@ -384,6 +387,7 @@ class HybridStrategy:
     last_position: GridPosition | None = None
     idle_ticks: int = 0
     patrol_target: GridPosition | None = None
+    patrol_target_updated_at: float = 0.0
     route: RouteState = field(default_factory=RouteState)
     enemy_history: dict[str, GridPosition] = field(default_factory=dict)
 
@@ -394,6 +398,7 @@ class HybridStrategy:
         self.last_position = obs.self_player.position
         self.idle_ticks = 0
         self.patrol_target = None
+        self.patrol_target_updated_at = 0.0
         self.route.clear()
         self.enemy_history.clear()
 
@@ -402,7 +407,6 @@ class HybridStrategy:
         me = obs.self_player
         my_pos = me.position
         enemies = _active_enemies(obs)
-        support = _is_support_bot(obs)
 
         forced_target = self._check_idle(obs)
         if forced_target is not None and not me.in_prison:
@@ -452,48 +456,8 @@ class HybridStrategy:
                 anchor=home_target,
             )
 
-        invaders = _intruders(obs, enemies)
-        if invaders:
-            target_enemy = min(
-                invaders,
-                key=lambda enemy: (
-                    0 if enemy.has_flag else 1,
-                    _manhattan(my_pos, enemy.position),
-                    enemy.position.z,
-                ),
-            )
-            enemy_distance = _manhattan(my_pos, target_enemy.position)
-            if support or target_enemy.has_flag or enemy_distance <= NEAR_DEFENSE_DISTANCE:
-                intercept = self._intercept_target(obs, my_pos, target_enemy)
-                intent = "Tag carrier" if target_enemy.has_flag else "Tag intruder"
-                return self._issue(
-                    actions,
-                    enemies,
-                    intent,
-                    intercept,
-                    radius=0,
-                    mode="defense",
-                    key=target_enemy.name,
-                    stage="intercept",
-                    anchor=target_enemy.position,
-                )
-
         committed_flag = self._committed_flag(obs)
         assigned_flag = committed_flag or _assign_flag(obs, enemies)
-
-        if committed_flag is None and _should_rescue(obs, my_pos, assigned_flag, support):
-            gate = PRISON_GATES[obs.my_team]
-            return self._issue(
-                actions,
-                enemies,
-                "Rescue",
-                gate,
-                radius=0,
-                mode="rescue",
-                key="gate",
-                stage="rescue",
-                anchor=gate,
-            )
 
         if assigned_flag is not None:
             route_target, stage = self._offense_target(obs, my_pos, assigned_flag, enemies)
@@ -510,17 +474,16 @@ class HybridStrategy:
             )
 
         self.route.clear()
-        patrol_target = self._next_patrol_target(obs, my_pos)
         return self._issue(
             actions,
             enemies,
-            "Patrol",
-            patrol_target,
-            radius=2,
-            mode="patrol",
-            key=f"patrol:{patrol_target.x}:{patrol_target.z}",
-            stage="patrol",
-            anchor=patrol_target,
+            "Hold",
+            my_pos,
+            radius=0,
+            mode="hold",
+            key="hold",
+            stage="hold",
+            anchor=my_pos,
         )
 
     def _committed_flag(self, obs: Observation) -> GridPosition | None:
@@ -549,10 +512,23 @@ class HybridStrategy:
         return self.patrol_target
 
     def _next_patrol_target(self, obs: Observation, origin: GridPosition) -> GridPosition:
-        if self.patrol_target is None or _manhattan(origin, self.patrol_target) <= PATROL_REACHED_RADIUS:
+        now = time.monotonic()
+        if (
+            self.patrol_target is None
+            or _manhattan(origin, self.patrol_target) <= PATROL_REACHED_RADIUS
+            or now - self.patrol_target_updated_at >= ROUTE_REFRESH_SECONDS
+        ):
             self.patrol_target = _patrol_target(obs, self.patrol_index)
+            self.patrol_target_updated_at = now
             self.patrol_index += 1
         return self.patrol_target
+
+    def _route_is_fresh(self, *, mode: str, key: str) -> bool:
+        return (
+            self.route.mode == mode
+            and self.route.key == key
+            and time.monotonic() - self.route.updated_at < ROUTE_REFRESH_SECONDS
+        )
 
     def _offense_target(
         self,
@@ -562,7 +538,7 @@ class HybridStrategy:
         enemies: tuple[PlayerState, ...],
     ) -> tuple[GridPosition, str]:
         key = f"flag:{flag_target.x}:{flag_target.z}"
-        same_route = self.route.mode == "offense" and self.route.key == key
+        same_route = self._route_is_fresh(mode="offense", key=key)
         stage = self.route.stage if same_route else None
         waypoint = self.route.waypoint if same_route else None
 
@@ -625,8 +601,9 @@ class HybridStrategy:
         home_target: GridPosition,
         enemies: tuple[PlayerState, ...],
     ) -> tuple[GridPosition, str]:
-        stage = self.route.stage if self.route.mode == "carrier" else None
-        waypoint = self.route.waypoint if self.route.mode == "carrier" else None
+        same_route = self._route_is_fresh(mode="carrier", key="home")
+        stage = self.route.stage if same_route else None
+        waypoint = self.route.waypoint if same_route else None
 
         if stage is None:
             waypoint = _build_crossing_waypoint(
@@ -714,6 +691,7 @@ class HybridStrategy:
         self.route.stage = stage
         self.route.anchor = anchor
         self.route.waypoint = target
+        self.route.updated_at = time.monotonic()
         self._travel(actions, intent, target, radius=radius, avoid_entities=avoid_entities)
         self.enemy_history = {enemy.name: enemy.position for enemy in enemies}
         return actions
