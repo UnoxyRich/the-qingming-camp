@@ -19,19 +19,22 @@ DEFAULT_PORT = 25565
 INIT_RETRY_SECONDS = 1.0
 ONLINE_WAIT_TIMEOUT_SECONDS = 30.0
 DEFAULT_LOG_DIR = Path("logs")
-FAST_PATHFINDER_MAX_DROP_DOWN = 4
-FAST_PATHFINDER_COST_MULTIPLIER = 8
+FAST_PATHFINDER_MAX_DROP_DOWN = 2
+FAST_PATHFINDER_COST_MULTIPLIER = 10
+FAST_PATHFINDER_SEARCH_RADIUS = 48
+FAST_PATHFINDER_TICK_TIMEOUT = 120
+FAST_PATHFINDER_THINK_TIMEOUT = 350
 SPRINT_REFRESH_SECONDS = 3.0
-BFS_GOAL_SEARCH_RADIUS = 14
+BFS_GOAL_SEARCH_RADIUS = 18
 PATH_AVOID_CELL_MEMORY_SECONDS = 6.0
-PATH_AVOID_NEIGHBOR_RADIUS = 2
+PATH_AVOID_NEIGHBOR_RADIUS = 3
 MAX_RECENT_CHAT_MESSAGES = 16
 JUMP_SUPPRESS_ENEMY_RADIUS = 8.0
 REPATH_SAME_GOAL_SECONDS = 0
-STUCK_MOVEMENT_SECONDS = 0.6
+STUCK_MOVEMENT_SECONDS = 0.45
 STUCK_PROGRESS_EPSILON = 0.3
-STUCK_RECOVERY_COOLDOWN_SECONDS = 1.5
-STUCK_RECOVERY_TURN_DISTANCE = 5.0
+STUCK_RECOVERY_COOLDOWN_SECONDS = 1.0
+STUCK_RECOVERY_TURN_DISTANCE = 6.0
 STUCK_RECOVERY_ANGLE_DEGREES = 30.0
 LEAF_PATH_BUFFER_RADIUS = 1
 PLAYER_PATH_BUFFER_RADIUS = 2
@@ -296,7 +299,7 @@ class World:
         pathfinder = getattr(self._bot, "pathfinder", None)
         if pathfinder is None:
             return
-        goal_signature = (action.x, action.z, action.radius, action.sprint)
+        goal_signature = (action.x, action.z, action.radius, action.sprint, action.jump)
         try:
             current_position = _current_bot_position(self._bot)
             self._update_move_progress(current_position)
@@ -306,6 +309,7 @@ class World:
                 now,
                 last_refresh_at=self._last_sprint_refresh_at,
                 refresh_interval=SPRINT_REFRESH_SECONDS,
+                jump=action.jump,
             )
             self._last_sprint_refresh_at = now
             movements = (
@@ -596,8 +600,9 @@ class World:
         # so we must NOT call once(bot, "spawn") here — it already happened.
         bot.loadPlugin(pathfinder.pathfinder)
         runtime_pathfinder = getattr(bot, "pathfinder", None)
-        _set_optional_attr(runtime_pathfinder, "tickTimeout", 80)
-        _set_optional_attr(runtime_pathfinder, "thinkTimeout", 1000)
+        _set_optional_attr(runtime_pathfinder, "tickTimeout", FAST_PATHFINDER_TICK_TIMEOUT)
+        _set_optional_attr(runtime_pathfinder, "thinkTimeout", FAST_PATHFINDER_THINK_TIMEOUT)
+        _set_optional_attr(runtime_pathfinder, "searchRadius", FAST_PATHFINDER_SEARCH_RADIUS)
 
         self._bot = bot
         self._require = require
@@ -1249,6 +1254,7 @@ def _serialize_action(action: Action) -> dict[str, Any]:
             "z": action.z,
             "radius": action.radius,
             "sprint": action.sprint,
+            "jump": action.jump,
         }
     if isinstance(action, DashTo):
         return {
@@ -1269,8 +1275,8 @@ def _serialize_action(action: Action) -> dict[str, Any]:
 def _build_fast_movements(pathfinder: Any, bot: Any, mc_data: Any) -> Any:
     movements = pathfinder.Movements(bot, mc_data)
     _set_optional_attr(movements, "allowSprinting", True)
-    _set_optional_attr(movements, "allowParkour", True)
-    _set_optional_attr(movements, "allowFreeMotion", True)
+    _set_optional_attr(movements, "allowParkour", False)
+    _set_optional_attr(movements, "allowFreeMotion", False)
     _set_optional_attr(movements, "allow1by1towers", False)
     _set_optional_attr(movements, "canDig", False)
     _set_optional_attr(movements, "canOpenDoors", True)
@@ -1462,7 +1468,16 @@ def _goal_cell_score(
     if current_position is not None:
         current_distance = abs(x - current_position[0]) + abs(z - current_position[2])
     avoidance_penalty = 100.0 if (x, z) in avoid_cells else 0.0
-    return (target_distance * 4.0) + current_distance - (clearance * 3.0) + avoidance_penalty
+    blocked_sides = 4 - clearance
+    diagonal_penalty = 8.0 if _has_diagonal_obstacle(bot, x, goal_y, z) else 0.0
+    return (
+        (target_distance * 4.0)
+        + current_distance
+        + avoidance_penalty
+        + (blocked_sides * 5.0)
+        + diagonal_penalty
+        - (clearance * 4.0)
+    )
 
 
 def _cell_clearance_score(bot: Any, x: int, goal_y: int, z: int) -> int:
@@ -1479,6 +1494,13 @@ def _has_straight_exit(bot: Any, x: int, goal_y: int, z: int) -> bool:
     ) or (
         _is_body_clear(bot, x, goal_y, z + 1) and _is_body_clear(bot, x, goal_y, z - 1)
     )
+
+
+def _has_diagonal_obstacle(bot: Any, x: int, goal_y: int, z: int) -> bool:
+    for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+        if _is_solid_block(_block_at_grid(bot, x + dx, goal_y, z + dz)):
+            return True
+    return False
 
 
 def _is_walkable_cell(bot: Any, x: int, goal_y: int, z: int) -> bool:
@@ -1642,13 +1664,14 @@ def _refresh_sprint_jump_state(
     *,
     last_refresh_at: float,
     refresh_interval: float,
+    jump: bool,
 ) -> None:
     should_toggle = last_refresh_at <= 0.0 or (now - last_refresh_at) >= refresh_interval
     if should_toggle:
         _set_control_state(bot, "sprint", False)
         _set_control_state(bot, "jump", False)
     _set_control_state(bot, "sprint", True)
-    _set_control_state(bot, "jump", False)
+    _set_control_state(bot, "jump", jump)
 
 
 def _resolve_runtime_player_team(

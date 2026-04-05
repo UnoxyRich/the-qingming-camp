@@ -1,8 +1,8 @@
 param(
     [ValidateSet("fixed", "random")]
     [string]$MapMode = "fixed",
-    [double]$ForsakenActionTickSeconds = 0.02,
     [double]$NormalActionTickSeconds = 0.05,
+    [double]$ForkedActionTickSeconds = 0.04,
     [int]$LeaderStartupDelaySeconds = 3,
     [int]$TeamSpacingDelaySeconds = 1,
     [switch]$Wait,
@@ -24,21 +24,21 @@ function New-RandomMemberTag {
 $Server = "10.31.0.101"
 $PerTeamPlayer = 2
 
-$ForsakenTeamNum = "27"
 $NormalTeamNum = "26"
+$ForkedTeamNum = "27"
 
-$forsakenLeaderTag = New-RandomMemberTag
-$forsakenFollowerTag = New-RandomMemberTag -Exclude @($forsakenLeaderTag)
-$normalLeaderTag = New-RandomMemberTag -Exclude @($forsakenLeaderTag, $forsakenFollowerTag)
-$normalFollowerTag = New-RandomMemberTag -Exclude @($forsakenLeaderTag, $forsakenFollowerTag, $normalLeaderTag)
+$normalLeaderTag = New-RandomMemberTag
+$normalFollowerTag = New-RandomMemberTag -Exclude @($normalLeaderTag)
+$forkedLeaderTag = New-RandomMemberTag -Exclude @($normalLeaderTag, $normalFollowerTag)
+$forkedFollowerTag = New-RandomMemberTag -Exclude @($normalLeaderTag, $normalFollowerTag, $forkedLeaderTag)
 
-$forsakenLeaderUsername = "CTF-$ForsakenTeamNum-$forsakenLeaderTag"
-$forsakenFollowerUsername = "CTF-$ForsakenTeamNum-$forsakenFollowerTag"
 $normalLeaderUsername = "CTF-$NormalTeamNum-$normalLeaderTag"
 $normalFollowerUsername = "CTF-$NormalTeamNum-$normalFollowerTag"
+$forkedLeaderUsername = "CTF-$ForkedTeamNum-$forkedLeaderTag"
+$forkedFollowerUsername = "CTF-$ForkedTeamNum-$forkedFollowerTag"
 
-$forsakenStrategyName = "forsaken_strategy.ForsakenStrategy"
 $normalStrategyName = "normal_strategy.NormalStrategy"
+$forkedStrategyName = "forked_normal_strategy.ForkedNormalStrategy"
 
 $botSpecs = @(
     @{
@@ -49,7 +49,7 @@ $botSpecs = @(
             "--my-no", "$normalFollowerTag",
             "--username", "$normalFollowerUsername",
             "--server", "$Server",
-            "--against", "$ForsakenTeamNum",
+            "--against", "$ForkedTeamNum",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
             "--action-tick", "$NormalActionTickSeconds",
@@ -59,18 +59,18 @@ $botSpecs = @(
         DelayBeforeStartSeconds = 0
     },
     @{
-        Label = "forsaken-2"
+        Label = "forked-2"
         Arguments = @(
             "main.py",
-            "--my-team", "$ForsakenTeamNum",
-            "--my-no", "$forsakenFollowerTag",
-            "--username", "$forsakenFollowerUsername",
+            "--my-team", "$ForkedTeamNum",
+            "--my-no", "$forkedFollowerTag",
+            "--username", "$forkedFollowerUsername",
             "--server", "$Server",
             "--against", "$NormalTeamNum",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
-            "--action-tick", "$ForsakenActionTickSeconds",
-            "--strategy", "$forsakenStrategyName",
+            "--action-tick", "$ForkedActionTickSeconds",
+            "--strategy", "$forkedStrategyName",
             "--verbose"
         )
         DelayBeforeStartSeconds = $TeamSpacingDelaySeconds
@@ -83,7 +83,7 @@ $botSpecs = @(
             "--my-no", "$normalLeaderTag",
             "--username", "$normalLeaderUsername",
             "--server", "$Server",
-            "--against", "$ForsakenTeamNum",
+            "--against", "$ForkedTeamNum",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
             "--action-tick", "$NormalActionTickSeconds",
@@ -93,18 +93,18 @@ $botSpecs = @(
         DelayBeforeStartSeconds = $LeaderStartupDelaySeconds
     },
     @{
-        Label = "forsaken-1"
+        Label = "forked-1"
         Arguments = @(
             "main.py",
-            "--my-team", "$ForsakenTeamNum",
-            "--my-no", "$forsakenLeaderTag",
-            "--username", "$forsakenLeaderUsername",
+            "--my-team", "$ForkedTeamNum",
+            "--my-no", "$forkedLeaderTag",
+            "--username", "$forkedLeaderUsername",
             "--server", "$Server",
             "--against", "$NormalTeamNum",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
-            "--action-tick", "$ForsakenActionTickSeconds",
-            "--strategy", "$forsakenStrategyName",
+            "--action-tick", "$ForkedActionTickSeconds",
+            "--strategy", "$forkedStrategyName",
             "--verbose"
         )
         DelayBeforeStartSeconds = ($LeaderStartupDelaySeconds + $TeamSpacingDelaySeconds)
@@ -112,15 +112,15 @@ $botSpecs = @(
 )
 
 Write-Host ""
-Write-Host "=== FORSAKEN VS NORMAL ===" -ForegroundColor Cyan
-Write-Host "Server:         $Server"
-Write-Host "Forsaken team:  $ForsakenTeamNum  ($forsakenLeaderUsername, $forsakenFollowerUsername)"
-Write-Host "Strategy:       ForsakenStrategy"
-Write-Host "Action tick:    ${ForsakenActionTickSeconds}s"
-Write-Host "Normal team:    $NormalTeamNum  ($normalLeaderUsername, $normalFollowerUsername)"
-Write-Host "Strategy:       NormalStrategy"
-Write-Host "Action tick:    ${NormalActionTickSeconds}s"
-Write-Host "Match:          $ForsakenTeamNum vs $NormalTeamNum, $PerTeamPlayer players each, map=$MapMode"
+Write-Host "=== NORMAL VS FORKED NORMAL ===" -ForegroundColor Cyan
+Write-Host "Server:          $Server"
+Write-Host "Normal team:     $NormalTeamNum  ($normalLeaderUsername, $normalFollowerUsername)"
+Write-Host "Strategy:        NormalStrategy"
+Write-Host "Action tick:     ${NormalActionTickSeconds}s"
+Write-Host "Forked team:     $ForkedTeamNum  ($forkedLeaderUsername, $forkedFollowerUsername)"
+Write-Host "Strategy:        ForkedNormalStrategy"
+Write-Host "Action tick:     ${ForkedActionTickSeconds}s"
+Write-Host "Match:           $NormalTeamNum vs $ForkedTeamNum, $PerTeamPlayer players each, map=$MapMode"
 Write-Host ""
 
 foreach ($bot in $botSpecs) {
