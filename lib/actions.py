@@ -17,7 +17,23 @@ class Chat:
     message: str
 
 
-Action: TypeAlias = MoveTo | Chat
+@dataclass(frozen=True, slots=True)
+class DashTo:
+    x: int
+    z: int
+    radius: int = 1
+    sprint: bool = True
+    jump: bool = True
 
 
-__all__ = ["Action", "Chat", "MoveTo"]
+@dataclass(frozen=True, slots=True)
+class Teleport:
+    x: float
+    y: float
+    z: float
+
+
+Action: TypeAlias = MoveTo | Chat | DashTo | Teleport
+
+
+__all__ = ["Action", "Chat", "DashTo", "MoveTo", "Teleport"]

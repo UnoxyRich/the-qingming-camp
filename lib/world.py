@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .actions import Action, Chat, MoveTo
+from .actions import Action, Chat, DashTo, MoveTo, Teleport
 from .observation import Observation, TeamName, normalize_team_name
 
 DEFAULT_SERVER = "10.31.0.101"
@@ -283,6 +283,12 @@ class World:
         if isinstance(action, Chat):
             self._safe_chat(action.message)
             return
+        if isinstance(action, DashTo):
+            self._dash_to(action.x, action.z, radius=action.radius, sprint=action.sprint, jump=action.jump)
+            return
+        if isinstance(action, Teleport):
+            self._teleport_raw(action.x, action.y, action.z)
+            return
         if not isinstance(action, MoveTo):
             raise TypeError(f"Unsupported action type: {type(action)!r}")
         if self._bot is None or self._movements is None or self._goal_near is None:
@@ -309,6 +315,13 @@ class World:
             )
             if getattr(pathfinder, "movements", None) is not movements:
                 pathfinder.setMovements(movements)
+            if now >= self._stuck_recovery_until and self._maybe_recover_from_stuck(
+                action,
+                pathfinder,
+                current_position,
+                observation,
+            ):
+                return
             goal_y = _current_goal_y(self._bot)
             self._expire_temporary_avoid_cells(now)
             avoid_cells = self._build_hazard_avoid_cells(
@@ -341,7 +354,7 @@ class World:
     ) -> None:
         if actions is None:
             return
-        if isinstance(actions, (MoveTo, Chat)):
+        if isinstance(actions, (MoveTo, Chat, DashTo, Teleport)):
             self.execute_action(actions, observation)
             return
         for action in actions:
@@ -358,8 +371,7 @@ class World:
             self._last_goal_set_at = 0.0
             self._stuck_recovery_until = 0.0
             self._last_sprint_refresh_at = 0.0
-            _set_control_state(self._bot, "sprint", False)
-            _set_control_state(self._bot, "jump", False)
+            _clear_motion_controls(self._bot)
             self._bot.pathfinder.setGoal(None)
         except Exception:
             try:
@@ -583,6 +595,9 @@ class World:
         # Note: 'spawn' fires before 'login' returns on this server,
         # so we must NOT call once(bot, "spawn") here — it already happened.
         bot.loadPlugin(pathfinder.pathfinder)
+        runtime_pathfinder = getattr(bot, "pathfinder", None)
+        _set_optional_attr(runtime_pathfinder, "tickTimeout", 80)
+        _set_optional_attr(runtime_pathfinder, "thinkTimeout", 1000)
 
         self._bot = bot
         self._require = require
@@ -839,6 +854,64 @@ class World:
             return True
         except Exception:
             return False
+
+    def _teleport_raw(self, x: float, y: float, z: float) -> None:
+        if self._bot is None:
+            return
+        try:
+            bot = self._bot
+            # Stop pathfinder so it doesn't fight the teleport
+            pathfinder = getattr(bot, "pathfinder", None)
+            if pathfinder is not None:
+                try:
+                    pathfinder.setGoal(None)
+                except Exception:
+                    pass
+            # Update local entity state so physics loop sends new position
+            bot.entity.position.set(x, y, z)
+            bot.entity.velocity.set(0, 0, 0)
+            self._last_move_goal = None
+            self._last_resolved_goal = None
+        except Exception:
+            pass
+
+    def _dash_to(self, x: int, z: int, *, radius: int, sprint: bool, jump: bool) -> None:
+        if self._bot is None:
+            return
+        try:
+            bot = self._bot
+            current_position = _current_bot_position(bot)
+            if current_position is None:
+                return
+            dx = float(x) - current_position[0]
+            dz = float(z) - current_position[2]
+            if math.hypot(dx, dz) <= max(0, radius) + 0.35:
+                _clear_motion_controls(bot)
+                self._last_move_goal = None
+                self._last_resolved_goal = None
+                return
+            pathfinder = getattr(bot, "pathfinder", None)
+            if pathfinder is not None:
+                try:
+                    pathfinder.setGoal(None)
+                except Exception:
+                    pass
+            look = getattr(bot, "look", None)
+            if callable(look):
+                yaw = math.atan2(-dx, -dz)
+                look(yaw, 0.0, True)
+            _set_control_state(bot, "back", False)
+            _set_control_state(bot, "left", False)
+            _set_control_state(bot, "right", False)
+            _set_control_state(bot, "forward", True)
+            _set_control_state(bot, "sprint", sprint)
+            _set_control_state(bot, "jump", jump)
+            self._last_move_goal = (x, z, radius, sprint, jump, "dash")
+            self._last_resolved_goal = (x, _current_goal_y(bot), z, radius)
+            self._stuck_recovery_until = 0.0
+            self._update_move_progress(current_position)
+        except Exception:
+            return
 
     def _append_log_line(self, log_path: Path, payload: Mapping[str, Any]) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1163,7 +1236,7 @@ def _mapping_like_get(value: Any, key: str) -> Any:
 def _normalize_actions(actions: Action | Iterable[Action] | None) -> tuple[Action, ...]:
     if actions is None:
         return ()
-    if isinstance(actions, (MoveTo, Chat)):
+    if isinstance(actions, (MoveTo, Chat, DashTo, Teleport)):
         return (actions,)
     return tuple(actions)
 
@@ -1177,8 +1250,19 @@ def _serialize_action(action: Action) -> dict[str, Any]:
             "radius": action.radius,
             "sprint": action.sprint,
         }
+    if isinstance(action, DashTo):
+        return {
+            "type": "DashTo",
+            "x": action.x,
+            "z": action.z,
+            "radius": action.radius,
+            "sprint": action.sprint,
+            "jump": action.jump,
+        }
     if isinstance(action, Chat):
         return {"type": "Chat", "message": action.message}
+    if isinstance(action, Teleport):
+        return {"type": "Teleport", "x": action.x, "y": action.y, "z": action.z}
     raise TypeError(f"Unsupported action type: {type(action)!r}")
 
 
@@ -1186,9 +1270,11 @@ def _build_fast_movements(pathfinder: Any, bot: Any, mc_data: Any) -> Any:
     movements = pathfinder.Movements(bot, mc_data)
     _set_optional_attr(movements, "allowSprinting", True)
     _set_optional_attr(movements, "allowParkour", True)
+    _set_optional_attr(movements, "allowFreeMotion", True)
     _set_optional_attr(movements, "allow1by1towers", False)
     _set_optional_attr(movements, "canDig", False)
     _set_optional_attr(movements, "canOpenDoors", True)
+    _set_optional_attr(movements, "allowEntityDetection", False)
     _set_optional_attr(movements, "maxDropDown", FAST_PATHFINDER_MAX_DROP_DOWN)
     _set_optional_attr(movements, "placeCost", FAST_PATHFINDER_COST_MULTIPLIER)
     _set_optional_attr(movements, "digCost", FAST_PATHFINDER_COST_MULTIPLIER)
@@ -1351,7 +1437,13 @@ def _is_safe_goal_cell(
         return False
     if _is_diagonal_pinched(bot, x, goal_y, z):
         return False
-    return _cell_clearance_score(bot, x, goal_y, z) >= 2
+    return _cell_clearance_score(bot, x, goal_y, z) >= _minimum_clearance_score(bot, x, goal_y, z)
+
+
+def _minimum_clearance_score(bot: Any, x: int, goal_y: int, z: int) -> int:
+    if _has_straight_exit(bot, x, goal_y, z):
+        return 1
+    return 2
 
 
 def _goal_cell_score(
@@ -1379,6 +1471,14 @@ def _cell_clearance_score(bot: Any, x: int, goal_y: int, z: int) -> int:
         if _is_body_clear(bot, x + dx, goal_y, z + dz):
             score += 1
     return score
+
+
+def _has_straight_exit(bot: Any, x: int, goal_y: int, z: int) -> bool:
+    return (
+        _is_body_clear(bot, x + 1, goal_y, z) and _is_body_clear(bot, x - 1, goal_y, z)
+    ) or (
+        _is_body_clear(bot, x, goal_y, z + 1) and _is_body_clear(bot, x, goal_y, z - 1)
+    )
 
 
 def _is_walkable_cell(bot: Any, x: int, goal_y: int, z: int) -> bool:
@@ -1529,6 +1629,11 @@ def _set_control_state(bot: Any, control: str, enabled: bool) -> None:
         set_control_state(control, enabled)
     except Exception:
         pass
+
+
+def _clear_motion_controls(bot: Any) -> None:
+    for control in ("forward", "back", "left", "right", "jump", "sprint", "sneak"):
+        _set_control_state(bot, control, False)
 
 
 def _refresh_sprint_jump_state(

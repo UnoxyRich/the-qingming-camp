@@ -1,4 +1,5 @@
 param(
+    [string]$AgainstTeam,
     [int]$PerTeamPlayer = 2,
     [ValidateSet("fixed", "random")]
     [string]$MapMode = "fixed",
@@ -20,18 +21,42 @@ function New-RandomMemberTag {
     return Get-Random -InputObject $choices
 }
 
+function Read-AgainstTeam {
+    param([string]$InitialValue)
+
+    $value = $InitialValue
+    while ($true) {
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            $value = Read-Host "Enter opponent team number, or 'random'/'none'"
+        }
+
+        $trimmed = $value.Trim().ToLowerInvariant()
+        if ($trimmed -in @("random", "none")) {
+            return $trimmed
+        }
+
+        $teamNumber = 0
+        if ([int]::TryParse($trimmed, [ref]$teamNumber) -and $teamNumber -gt 0) {
+            return [string]$teamNumber
+        }
+
+        Write-Host "Invalid team selection. Use a positive integer, 'random', or 'none'." -ForegroundColor Yellow
+        $value = $null
+    }
+}
+
 # --- Team config ---
 $TeamNum = "26"
 $Server = "10.31.0.101"
 
 # --- Against team ---
-$AgainstTeam = "random"
+$AgainstTeam = Read-AgainstTeam -InitialValue $AgainstTeam
 
 # --- Generate unique bot tags ---
-$leaderTag  = New-RandomMemberTag
+$leaderTag = New-RandomMemberTag
 $followerTag = New-RandomMemberTag -Exclude @($leaderTag)
 
-$leaderUsername  = "CTF-$TeamNum-$leaderTag"
+$leaderUsername = "CTF-$TeamNum-$leaderTag"
 $followerUsername = "CTF-$TeamNum-$followerTag"
 
 $strategyName = "collect_only_strategy.CollectOnlyStrategy"
@@ -45,6 +70,7 @@ $botSpecs = @(
             "--my-team", "$TeamNum",
             "--my-no", "$followerTag",
             "--username", "$followerUsername",
+            "--server", "$Server",
             "--against", "$AgainstTeam",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
@@ -61,6 +87,7 @@ $botSpecs = @(
             "--my-team", "$TeamNum",
             "--my-no", "$leaderTag",
             "--username", "$leaderUsername",
+            "--server", "$Server",
             "--against", "$AgainstTeam",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
@@ -74,8 +101,9 @@ $botSpecs = @(
 
 # --- Preview ---
 Write-Host ""
-Write-Host "=== FIGHT ===" -ForegroundColor Cyan
+Write-Host "=== AGAINST TEAM ===" -ForegroundColor Cyan
 Write-Host "Our team:     $TeamNum  ($leaderUsername, $followerUsername)"
+Write-Host "Server:       $Server"
 Write-Host "Opponent:     $AgainstTeam"
 Write-Host "Strategy:     CollectOnlyStrategy"
 Write-Host "Action tick:  ${ActionTickSeconds}s"

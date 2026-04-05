@@ -2,7 +2,7 @@ param(
     [int]$PerTeamPlayer = 2,
     [ValidateSet("fixed", "random")]
     [string]$MapMode = "fixed",
-    [double]$ActionTickSeconds = 0.05,
+    [double]$ActionTickSeconds = 0.02,
     [int]$LeaderStartupDelaySeconds = 3,
     [switch]$Wait,
     [switch]$DryRun
@@ -34,17 +34,18 @@ $followerTag = New-RandomMemberTag -Exclude @($leaderTag)
 $leaderUsername  = "CTF-$TeamNum-$leaderTag"
 $followerUsername = "CTF-$TeamNum-$followerTag"
 
-$strategyName = "collect_only_strategy.CollectOnlyStrategy"
+$strategyName = "forsaken_strategy.ForsakenStrategy"
 
 # --- Bot launch specs ---
 $botSpecs = @(
     @{
-        Label = "bot-2"
+        Label = "forsaken-2"
         Arguments = @(
             "main.py",
             "--my-team", "$TeamNum",
             "--my-no", "$followerTag",
             "--username", "$followerUsername",
+            "--server", "$Server",
             "--against", "$AgainstTeam",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
@@ -55,12 +56,13 @@ $botSpecs = @(
         DelayBeforeStartSeconds = 0
     },
     @{
-        Label = "bot-1"
+        Label = "forsaken-1"
         Arguments = @(
             "main.py",
             "--my-team", "$TeamNum",
             "--my-no", "$leaderTag",
             "--username", "$leaderUsername",
+            "--server", "$Server",
             "--against", "$AgainstTeam",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
@@ -74,10 +76,11 @@ $botSpecs = @(
 
 # --- Preview ---
 Write-Host ""
-Write-Host "=== FIGHT ===" -ForegroundColor Cyan
+Write-Host "=== FORSAKEN (Fast Sprint) ===" -ForegroundColor Magenta
 Write-Host "Our team:     $TeamNum  ($leaderUsername, $followerUsername)"
+Write-Host "Server:       $Server"
 Write-Host "Opponent:     $AgainstTeam"
-Write-Host "Strategy:     CollectOnlyStrategy"
+Write-Host "Strategy:     ForsakenStrategy (aggressive pathfinder, 0.02s tick)"
 Write-Host "Action tick:  ${ActionTickSeconds}s"
 Write-Host "Chat intent:  with $AgainstTeam $PerTeamPlayer $MapMode"
 Write-Host ""
@@ -118,7 +121,7 @@ try {
 }
 finally {
     $running = $processes | Where-Object { -not $_.HasExited }
-    if ($running) {
-        $running | Stop-Process -Force
+    foreach ($p in $running) {
+        try { $p.Kill() } catch {}
     }
 }

@@ -440,17 +440,17 @@ class CollectOnlyStrategy:
             self._snapshot_enemies(enemies)
             return actions
 
-        # --- 2. Carrying flag: go DIRECTLY to nearest gold block ---
+        # --- 2. Carrying flag: go STRAIGHT home, pathfinder avoids leaves+enemies ---
         if me.has_flag:
             home_target = _closest_block(my_pos, obs.my_targets)
             if home_target is not None:
-                dest = _carrier_direct_route(my_pos, home_target.grid_position, enemies, my_team)
-                dest = _anti_idle_target(my_pos, dest, my_team)
+                dest = home_target.grid_position
                 self._go(actions, "Plant flag", dest, radius=0)
             else:
-                fb = _anti_idle_target(my_pos, _patrol_point(my_team, self.patrol_index), my_team)
-                self.patrol_index += 1
-                self._go(actions, "Flag reposition", fb, radius=1)
+                # Fallback: head deep into own territory
+                home_x = -18 if my_team == "L" else 18
+                dest = _clamp_pos(home_x, my_pos.z)
+                self._go(actions, "Flag home", dest, radius=1)
             self._snapshot_enemies(enemies)
             return actions
 
