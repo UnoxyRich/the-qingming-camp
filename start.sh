@@ -20,5 +20,5 @@ python main.py \
   --against "$AGAINST_TEAM" \
   --per-team-player "$PER_TEAM_PLAYER" \
   --map "$MAP_MODE" \
-  --strategy "ctf_strategy.AttackerStrategy" \
+  --strategy "hybrid_strategy.HybridStrategy" \
   --verbose

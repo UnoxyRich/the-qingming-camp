@@ -1,4 +1,5 @@
-from student_strategy import RandomWalkStrategy
-from default_strategy import PickClosestFlagAndBackStrategy
+from hybrid_strategy import HybridStrategy
+from hybrid_strategy import HybridStrategy as PickClosestFlagAndBackStrategy
+from hybrid_strategy import HybridStrategy as RandomWalkStrategy
 
-__all__ = ["PickClosestFlagAndBackStrategy", "RandomWalkStrategy"]
+__all__ = ["HybridStrategy", "PickClosestFlagAndBackStrategy", "RandomWalkStrategy"]

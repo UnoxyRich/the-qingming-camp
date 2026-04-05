@@ -1,8 +1,7 @@
 param(
     [ValidateSet("fixed", "random")]
     [string]$MapMode = "fixed",
-    [double]$HybridActionTickSeconds = 0.03,
-    [double]$NormalActionTickSeconds = 0.05,
+    [double]$ActionTickSeconds = 0.03,
     [int]$LeaderStartupDelaySeconds = 3,
     [int]$TeamSpacingDelaySeconds = 1,
     [switch]$Wait,
@@ -13,6 +12,7 @@ $ErrorActionPreference = "Stop"
 $env:PYTHONIOENCODING = "utf-8"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = Split-Path -Parent $scriptDir
 
 function New-RandomMemberTag {
     param([string[]]$Exclude = @())
@@ -24,87 +24,86 @@ function New-RandomMemberTag {
 $Server = "10.31.0.101"
 $PerTeamPlayer = 2
 
-$HybridTeamNum = "27"
-$NormalTeamNum = "26"
+$TeamA = "26"
+$TeamB = "27"
 
-$hybridLeaderTag = New-RandomMemberTag
-$hybridFollowerTag = New-RandomMemberTag -Exclude @($hybridLeaderTag)
-$normalLeaderTag = New-RandomMemberTag -Exclude @($hybridLeaderTag, $hybridFollowerTag)
-$normalFollowerTag = New-RandomMemberTag -Exclude @($hybridLeaderTag, $hybridFollowerTag, $normalLeaderTag)
+$teamALeaderTag = New-RandomMemberTag
+$teamAFollowerTag = New-RandomMemberTag -Exclude @($teamALeaderTag)
+$teamBLeaderTag = New-RandomMemberTag -Exclude @($teamALeaderTag, $teamAFollowerTag)
+$teamBFollowerTag = New-RandomMemberTag -Exclude @($teamALeaderTag, $teamAFollowerTag, $teamBLeaderTag)
 
-$hybridLeaderUsername = "CTF-$HybridTeamNum-$hybridLeaderTag"
-$hybridFollowerUsername = "CTF-$HybridTeamNum-$hybridFollowerTag"
-$normalLeaderUsername = "CTF-$NormalTeamNum-$normalLeaderTag"
-$normalFollowerUsername = "CTF-$NormalTeamNum-$normalFollowerTag"
+$teamALeaderUsername = "CTF-$TeamA-$teamALeaderTag"
+$teamAFollowerUsername = "CTF-$TeamA-$teamAFollowerTag"
+$teamBLeaderUsername = "CTF-$TeamB-$teamBLeaderTag"
+$teamBFollowerUsername = "CTF-$TeamB-$teamBFollowerTag"
 
-$hybridStrategyName = "hybrid_strategy.HybridStrategy"
-$normalStrategyName = "normal_strategy.NormalStrategy"
+$strategyName = "hybrid_strategy.HybridStrategy"
 
 $botSpecs = @(
     @{
-        Label = "normal-2"
+        Label = "teamA-2"
         Arguments = @(
             "main.py",
-            "--my-team", "$NormalTeamNum",
-            "--my-no", "$normalFollowerTag",
-            "--username", "$normalFollowerUsername",
+            "--my-team", "$TeamA",
+            "--my-no", "$teamAFollowerTag",
+            "--username", "$teamAFollowerUsername",
             "--server", "$Server",
-            "--against", "$HybridTeamNum",
+            "--against", "$TeamB",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
-            "--action-tick", "$NormalActionTickSeconds",
-            "--strategy", "$normalStrategyName",
+            "--action-tick", "$ActionTickSeconds",
+            "--strategy", "$strategyName",
             "--verbose"
         )
         DelayBeforeStartSeconds = 0
     },
     @{
-        Label = "hybrid-2"
+        Label = "teamB-2"
         Arguments = @(
             "main.py",
-            "--my-team", "$HybridTeamNum",
-            "--my-no", "$hybridFollowerTag",
-            "--username", "$hybridFollowerUsername",
+            "--my-team", "$TeamB",
+            "--my-no", "$teamBFollowerTag",
+            "--username", "$teamBFollowerUsername",
             "--server", "$Server",
-            "--against", "$NormalTeamNum",
+            "--against", "$TeamA",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
-            "--action-tick", "$HybridActionTickSeconds",
-            "--strategy", "$hybridStrategyName",
+            "--action-tick", "$ActionTickSeconds",
+            "--strategy", "$strategyName",
             "--verbose"
         )
         DelayBeforeStartSeconds = $TeamSpacingDelaySeconds
     },
     @{
-        Label = "normal-1"
+        Label = "teamA-1"
         Arguments = @(
             "main.py",
-            "--my-team", "$NormalTeamNum",
-            "--my-no", "$normalLeaderTag",
-            "--username", "$normalLeaderUsername",
+            "--my-team", "$TeamA",
+            "--my-no", "$teamALeaderTag",
+            "--username", "$teamALeaderUsername",
             "--server", "$Server",
-            "--against", "$HybridTeamNum",
+            "--against", "$TeamB",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
-            "--action-tick", "$NormalActionTickSeconds",
-            "--strategy", "$normalStrategyName",
+            "--action-tick", "$ActionTickSeconds",
+            "--strategy", "$strategyName",
             "--verbose"
         )
         DelayBeforeStartSeconds = $LeaderStartupDelaySeconds
     },
     @{
-        Label = "hybrid-1"
+        Label = "teamB-1"
         Arguments = @(
             "main.py",
-            "--my-team", "$HybridTeamNum",
-            "--my-no", "$hybridLeaderTag",
-            "--username", "$hybridLeaderUsername",
+            "--my-team", "$TeamB",
+            "--my-no", "$teamBLeaderTag",
+            "--username", "$teamBLeaderUsername",
             "--server", "$Server",
-            "--against", "$NormalTeamNum",
+            "--against", "$TeamA",
             "--per-team-player", "$PerTeamPlayer",
             "--map", "$MapMode",
-            "--action-tick", "$HybridActionTickSeconds",
-            "--strategy", "$hybridStrategyName",
+            "--action-tick", "$ActionTickSeconds",
+            "--strategy", "$strategyName",
             "--verbose"
         )
         DelayBeforeStartSeconds = ($LeaderStartupDelaySeconds + $TeamSpacingDelaySeconds)
@@ -112,15 +111,15 @@ $botSpecs = @(
 )
 
 Write-Host ""
-Write-Host "=== HYBRID VS NORMAL ===" -ForegroundColor Cyan
+Write-Host "=== HYBRID VS HYBRID (2v2) ===" -ForegroundColor Cyan
 Write-Host "Server:        $Server"
-Write-Host "Hybrid team:   $HybridTeamNum  ($hybridLeaderUsername, $hybridFollowerUsername)"
+Write-Host "Team A:        $TeamA  ($teamALeaderUsername, $teamAFollowerUsername)"
 Write-Host "Strategy:      HybridStrategy"
-Write-Host "Action tick:   ${HybridActionTickSeconds}s"
-Write-Host "Normal team:   $NormalTeamNum  ($normalLeaderUsername, $normalFollowerUsername)"
-Write-Host "Strategy:      NormalStrategy"
-Write-Host "Action tick:   ${NormalActionTickSeconds}s"
-Write-Host "Match:         $HybridTeamNum vs $NormalTeamNum, $PerTeamPlayer players each, map=$MapMode"
+Write-Host "Action tick:   ${ActionTickSeconds}s"
+Write-Host "Team B:        $TeamB  ($teamBLeaderUsername, $teamBFollowerUsername)"
+Write-Host "Strategy:      HybridStrategy"
+Write-Host "Action tick:   ${ActionTickSeconds}s"
+Write-Host "Match:         $TeamA vs $TeamB, $PerTeamPlayer players each, map=$MapMode"
 Write-Host ""
 
 foreach ($bot in $botSpecs) {
@@ -144,7 +143,7 @@ $processes = foreach ($bot in $botSpecs) {
     Start-Process `
         -FilePath "python" `
         -ArgumentList $bot.Arguments `
-        -WorkingDirectory $scriptDir `
+        -WorkingDirectory $repoRoot `
         -PassThru
 }
 

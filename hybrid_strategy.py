@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -122,6 +123,66 @@ def _enemy_pressure(position: GridPosition, enemies: tuple[PlayerState, ...]) ->
     return pressure
 
 
+def _is_on_line_segment(
+    start: GridPosition,
+    end: GridPosition,
+    point: GridPosition,
+    *,
+    tolerance: float = 3.0,
+) -> bool:
+    segment_dx = end.x - start.x
+    segment_dz = end.z - start.z
+    segment_length_squared = (segment_dx * segment_dx) + (segment_dz * segment_dz)
+    if segment_length_squared == 0:
+        return _manhattan(start, point) <= tolerance
+
+    projection = (
+        ((point.x - start.x) * segment_dx) + ((point.z - start.z) * segment_dz)
+    ) / segment_length_squared
+    clamped_projection = max(0.0, min(1.0, projection))
+    closest_x = start.x + (segment_dx * clamped_projection)
+    closest_z = start.z + (segment_dz * clamped_projection)
+    return math.hypot(point.x - closest_x, point.z - closest_z) <= tolerance
+
+
+def _path_blocked_by_enemy(
+    origin: GridPosition,
+    target: GridPosition,
+    enemies: tuple[PlayerState, ...],
+    *,
+    tolerance: float = 3.0,
+) -> bool:
+    return any(
+        _is_on_line_segment(origin, target, enemy.position, tolerance=tolerance)
+        for enemy in enemies
+    )
+
+
+def _line_detour_target(
+    obs: Observation,
+    origin: GridPosition,
+    target: GridPosition,
+    enemies: tuple[PlayerState, ...],
+    *,
+    toward_enemy: bool,
+) -> GridPosition:
+    if not _path_blocked_by_enemy(origin, target, enemies):
+        return target
+
+    offset = 5 if origin.z < target.z else -5
+    sign = _travel_sign(obs.my_team, toward_enemy=toward_enemy)
+    alternative = GridPosition(
+        x=int(round((origin.x + target.x) / 2)),
+        z=target.z + offset,
+    )
+    return _lock_forward_progress(
+        obs,
+        origin,
+        _clamp_to_map(obs, alternative.x, alternative.z),
+        sign,
+    )
+
+
 def _build_crossing_waypoint(
     obs: Observation,
     origin: GridPosition,
@@ -169,6 +230,16 @@ def _detour_target(
     forward_steps: tuple[int, ...],
     z_offsets: tuple[int, ...],
 ) -> GridPosition:
+    direct_detour = _line_detour_target(
+        obs,
+        origin,
+        target,
+        enemies,
+        toward_enemy=toward_enemy,
+    )
+    if direct_detour != target:
+        target = direct_detour
+
     nearby = tuple(enemy for enemy in enemies if _manhattan(target, enemy.position) <= 6)
     if not nearby:
         return target

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the partner CTF bot (Defender role) in empty-arena debug mode by default.
+# Start the partner CTF bot with the retained hybrid strategy in empty-arena debug mode by default.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,5 +20,5 @@ python main.py \
   --against "$AGAINST_TEAM" \
   --per-team-player "$PER_TEAM_PLAYER" \
   --map "$MAP_MODE" \
-  --strategy "ctf_strategy.DefenderStrategy" \
+  --strategy "hybrid_strategy.HybridStrategy" \
   --verbose

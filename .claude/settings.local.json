@@ -4,7 +4,7 @@
       "WebFetch(domain:ucndr9srcy1r.feishu.cn)",
       "WebSearch",
       "Bash(cp -r lib partner_build/)",
-      "Bash(cp ctf_strategy.py default_strategy.py render.py map_to_json.py package.json package-lock.json .gitignore partner_build/)",
+      "Bash(cp hybrid_strategy.py render.py map_to_json.py package.json package-lock.json .gitignore partner_build/)",
       "Bash(cd:*)"
     ]
   }

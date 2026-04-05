@@ -16,7 +16,7 @@ from lib.world import (
     build_multi_log_path,
 )
 
-DEFAULT_STRATEGY = "student_strategy.RandomWalkStrategy"
+DEFAULT_STRATEGY = "hybrid_strategy.HybridStrategy"
 JS_PRELOAD_MODULES = (
     "mineflayer",
     "mineflayer-pathfinder",

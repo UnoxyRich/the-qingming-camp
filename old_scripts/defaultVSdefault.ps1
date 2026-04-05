@@ -1,7 +1,7 @@
 param(
     [ValidateSet("fixed", "random")]
     [string]$MapMode = "fixed",
-    [double]$ActionTickSeconds = 0.03,
+    [double]$ActionTickSeconds = 0.05,
     [int]$LeaderStartupDelaySeconds = 3,
     [int]$TeamSpacingDelaySeconds = 1,
     [switch]$Wait,
@@ -12,6 +12,7 @@ $ErrorActionPreference = "Stop"
 $env:PYTHONIOENCODING = "utf-8"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = Split-Path -Parent $scriptDir
 
 function New-RandomMemberTag {
     param([string[]]$Exclude = @())
@@ -26,15 +27,15 @@ $PerTeamPlayer = 2
 $TeamA = "26"
 $TeamB = "27"
 
-$teamALeaderTag = New-RandomMemberTag
-$teamAFollowerTag = New-RandomMemberTag -Exclude @($teamALeaderTag)
-$teamBLeaderTag = New-RandomMemberTag -Exclude @($teamALeaderTag, $teamAFollowerTag)
-$teamBFollowerTag = New-RandomMemberTag -Exclude @($teamALeaderTag, $teamAFollowerTag, $teamBLeaderTag)
+$teamA_LeaderTag = New-RandomMemberTag
+$teamA_FollowerTag = New-RandomMemberTag -Exclude @($teamA_LeaderTag)
+$teamB_LeaderTag = New-RandomMemberTag -Exclude @($teamA_LeaderTag, $teamA_FollowerTag)
+$teamB_FollowerTag = New-RandomMemberTag -Exclude @($teamA_LeaderTag, $teamA_FollowerTag, $teamB_LeaderTag)
 
-$teamALeaderUsername = "CTF-$TeamA-$teamALeaderTag"
-$teamAFollowerUsername = "CTF-$TeamA-$teamAFollowerTag"
-$teamBLeaderUsername = "CTF-$TeamB-$teamBLeaderTag"
-$teamBFollowerUsername = "CTF-$TeamB-$teamBFollowerTag"
+$teamA_LeaderUsername = "CTF-$TeamA-$teamA_LeaderTag"
+$teamA_FollowerUsername = "CTF-$TeamA-$teamA_FollowerTag"
+$teamB_LeaderUsername = "CTF-$TeamB-$teamB_LeaderTag"
+$teamB_FollowerUsername = "CTF-$TeamB-$teamB_FollowerTag"
 
 $strategyName = "hybrid_strategy.HybridStrategy"
 
@@ -44,8 +45,8 @@ $botSpecs = @(
         Arguments = @(
             "main.py",
             "--my-team", "$TeamA",
-            "--my-no", "$teamAFollowerTag",
-            "--username", "$teamAFollowerUsername",
+            "--my-no", "$teamA_FollowerTag",
+            "--username", "$teamA_FollowerUsername",
             "--server", "$Server",
             "--against", "$TeamB",
             "--per-team-player", "$PerTeamPlayer",
@@ -61,8 +62,8 @@ $botSpecs = @(
         Arguments = @(
             "main.py",
             "--my-team", "$TeamB",
-            "--my-no", "$teamBFollowerTag",
-            "--username", "$teamBFollowerUsername",
+            "--my-no", "$teamB_FollowerTag",
+            "--username", "$teamB_FollowerUsername",
             "--server", "$Server",
             "--against", "$TeamA",
             "--per-team-player", "$PerTeamPlayer",
@@ -78,8 +79,8 @@ $botSpecs = @(
         Arguments = @(
             "main.py",
             "--my-team", "$TeamA",
-            "--my-no", "$teamALeaderTag",
-            "--username", "$teamALeaderUsername",
+            "--my-no", "$teamA_LeaderTag",
+            "--username", "$teamA_LeaderUsername",
             "--server", "$Server",
             "--against", "$TeamB",
             "--per-team-player", "$PerTeamPlayer",
@@ -95,8 +96,8 @@ $botSpecs = @(
         Arguments = @(
             "main.py",
             "--my-team", "$TeamB",
-            "--my-no", "$teamBLeaderTag",
-            "--username", "$teamBLeaderUsername",
+            "--my-no", "$teamB_LeaderTag",
+            "--username", "$teamB_LeaderUsername",
             "--server", "$Server",
             "--against", "$TeamA",
             "--per-team-player", "$PerTeamPlayer",
@@ -110,13 +111,11 @@ $botSpecs = @(
 )
 
 Write-Host ""
-Write-Host "=== HYBRID VS HYBRID (2v2) ===" -ForegroundColor Cyan
+Write-Host "=== HYBRID VS HYBRID (archived 2v2 launcher) ===" -ForegroundColor Cyan
 Write-Host "Server:        $Server"
-Write-Host "Team A:        $TeamA  ($teamALeaderUsername, $teamAFollowerUsername)"
-Write-Host "Strategy:      HybridStrategy"
-Write-Host "Action tick:   ${ActionTickSeconds}s"
-Write-Host "Team B:        $TeamB  ($teamBLeaderUsername, $teamBFollowerUsername)"
-Write-Host "Strategy:      HybridStrategy"
+Write-Host "Team A:        $TeamA  ($teamA_LeaderUsername, $teamA_FollowerUsername)"
+Write-Host "Team B:        $TeamB  ($teamB_LeaderUsername, $teamB_FollowerUsername)"
+Write-Host "Strategy:      $strategyName"
 Write-Host "Action tick:   ${ActionTickSeconds}s"
 Write-Host "Match:         $TeamA vs $TeamB, $PerTeamPlayer players each, map=$MapMode"
 Write-Host ""
@@ -142,7 +141,7 @@ $processes = foreach ($bot in $botSpecs) {
     Start-Process `
         -FilePath "python" `
         -ArgumentList $bot.Arguments `
-        -WorkingDirectory $scriptDir `
+        -WorkingDirectory $repoRoot `
         -PassThru
 }
 
