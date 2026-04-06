@@ -13,6 +13,14 @@ L_TERRITORY_X = -12  # Deep in left territory
 R_TERRITORY_X = 12   # Deep in right territory
 PRISON_GATE_L = (-16, 24)
 PRISON_GATE_R = (16, 24)
+PRISON_OUTER_PLATE_L = (-16, 24)
+PRISON_OUTER_PLATE_R = (16, 24)
+PRISON_INNER_PLATE_L = (-16, 28)
+PRISON_INNER_PLATE_R = (16, 28)
+PRISON_INNER_STAGING_L = (-16, 27)
+PRISON_INNER_STAGING_R = (16, 27)
+PRISON_ESCAPE_L = (-16, 23)
+PRISON_ESCAPE_R = (16, 23)
 
 # Danger zone: how close an enemy must be to be considered a threat
 ENEMY_DANGER_RADIUS = 8
@@ -91,6 +99,58 @@ def _prison_gate_for_team(team: str) -> GridPosition:
     return GridPosition(x=PRISON_GATE_R[0], z=PRISON_GATE_R[1])
 
 
+def _prison_outer_plate_for_team(team: str) -> GridPosition:
+    if team == "L":
+        return GridPosition(x=PRISON_OUTER_PLATE_L[0], z=PRISON_OUTER_PLATE_L[1])
+    return GridPosition(x=PRISON_OUTER_PLATE_R[0], z=PRISON_OUTER_PLATE_R[1])
+
+
+def _prison_inner_plate_for_team(team: str) -> GridPosition:
+    if team == "L":
+        return GridPosition(x=PRISON_INNER_PLATE_L[0], z=PRISON_INNER_PLATE_L[1])
+    return GridPosition(x=PRISON_INNER_PLATE_R[0], z=PRISON_INNER_PLATE_R[1])
+
+
+def _prison_inner_staging_for_team(team: str) -> GridPosition:
+    if team == "L":
+        return GridPosition(x=PRISON_INNER_STAGING_L[0], z=PRISON_INNER_STAGING_L[1])
+    return GridPosition(x=PRISON_INNER_STAGING_R[0], z=PRISON_INNER_STAGING_R[1])
+
+
+def _prison_escape_for_team(team: str) -> GridPosition:
+    if team == "L":
+        return GridPosition(x=PRISON_ESCAPE_L[0], z=PRISON_ESCAPE_L[1])
+    return GridPosition(x=PRISON_ESCAPE_R[0], z=PRISON_ESCAPE_R[1])
+
+
+def _prisoner_release_target(position: GridPosition, team: str) -> tuple[GridPosition, int, str]:
+    inner_plate = _prison_inner_plate_for_team(team)
+    inner_staging = _prison_inner_staging_for_team(team)
+    escape = _prison_escape_for_team(team)
+    if _manhattan(position, inner_staging) <= 1 or _manhattan(position, inner_plate) <= 1:
+        return escape, 0, "Exit prison"
+    return inner_plate, 0, "Move to release plate"
+
+
+def _is_home_territory(position: GridPosition, team: str) -> bool:
+    if team == "L":
+        return position.x <= MIDFIELD_X
+    return position.x >= MIDFIELD_X
+
+
+def _is_enemy_territory(position: GridPosition, team: str) -> bool:
+    return not _is_home_territory(position, team)
+
+
+def _home_reentry_target(position: GridPosition, team: str) -> GridPosition:
+    if team == "L":
+        target_x = max(L_TERRITORY_X, -6)
+    else:
+        target_x = min(R_TERRITORY_X, 6)
+    target_z = max(-20, min(20, position.z))
+    return GridPosition(x=target_x, z=target_z)
+
+
 # ---------------------------------------------------------------------------
 # Attacker Strategy — focuses on capturing enemy flags and scoring
 # ---------------------------------------------------------------------------
@@ -100,7 +160,7 @@ class AttackerStrategy:
     """Aggressive flag-capturing strategy.
 
     Priorities:
-    1. If jailed → wait
+    1. If jailed → move to prison gate for faster rescue
     2. If carrying flag → sprint home to score (with evasion)
     3. Rescue nearby jailed teammate (opportunistic)
     4. Capture enemy flag (prefer safest one away from enemies)
@@ -121,11 +181,13 @@ class AttackerStrategy:
         me = obs.self_player
         pos = obs.me.position
         enemies = obs.enemies
+        on_home_side = _is_home_territory(pos, obs.my_team)
 
-        # 1. Jailed — stay put
+        # 1. Jailed — move to the prison gate so a teammate can free us quickly
         if me.in_prison:
-            self._announce(actions, "Jailed", pos.x, pos.z)
-            actions.append(MoveTo(x=pos.x, z=pos.z, radius=0, sprint=False))
+            target, radius, intent = _prisoner_release_target(pos, obs.my_team)
+            self._announce(actions, intent, target.x, target.z)
+            actions.append(MoveTo(x=target.x, z=target.z, radius=radius, sprint=True))
             return actions
 
         # 2. Carrying flag — rush home to score
@@ -138,13 +200,13 @@ class AttackerStrategy:
                 actions.append(MoveTo(x=safe.x, z=safe.z, radius=0, sprint=True))
                 return actions
 
-        # 3. Rescue jailed teammate if close
+        # 3. Rescue jailed teammate aggressively in 2v2 so teams do not deadlock
         jailed = tuple(t for t in obs.teammates if t.in_prison)
         nearest_jailed = _closest_player(pos, jailed)
-        if nearest_jailed is not None and _manhattan(pos, nearest_jailed.position) <= 15:
-            gate = _prison_gate_for_team(obs.my_team)
-            self._announce(actions, "Quick rescue", gate.x, gate.z)
-            actions.append(MoveTo(x=gate.x, z=gate.z, radius=1, sprint=True))
+        if nearest_jailed is not None:
+            plate = _prison_outer_plate_for_team(obs.my_team)
+            self._announce(actions, "Quick rescue", plate.x, plate.z)
+            actions.append(MoveTo(x=plate.x, z=plate.z, radius=0, sprint=True))
             return actions
 
         # 4. Capture enemy flag
@@ -192,7 +254,7 @@ class DefenderStrategy:
     """Defensive strategy: guard flags, intercept carriers, rescue teammates.
 
     Priorities:
-    1. If jailed → wait
+    1. If jailed → move to prison gate for faster rescue
     2. If carrying flag → sprint home to score
     3. Chase enemy flag carrier (highest defensive priority)
     4. Rescue jailed teammates
@@ -215,11 +277,13 @@ class DefenderStrategy:
         me = obs.self_player
         pos = obs.me.position
         enemies = obs.enemies
+        on_home_side = _is_home_territory(pos, obs.my_team)
 
-        # 1. Jailed — stay put
+        # 1. Jailed — move to the prison gate so a teammate can free us quickly
         if me.in_prison:
-            self._announce(actions, "Jailed", pos.x, pos.z)
-            actions.append(MoveTo(x=pos.x, z=pos.z, radius=0, sprint=False))
+            target, radius, intent = _prisoner_release_target(pos, obs.my_team)
+            self._announce(actions, intent, target.x, target.z)
+            actions.append(MoveTo(x=target.x, z=target.z, radius=radius, sprint=True))
             return actions
 
         # 2. Carrying flag — rush home to score (even defenders score if they get a flag)
@@ -236,31 +300,42 @@ class DefenderStrategy:
         enemy_carriers = tuple(e for e in enemies if e.has_flag and not e.in_prison)
         if enemy_carriers:
             carrier = _closest_player(pos, enemy_carriers)
-            if carrier is not None and _manhattan(pos, carrier.position) <= FLAG_CARRIER_CHASE_RANGE:
-                self._announce(actions, "Chasing carrier", carrier.position.x, carrier.position.z)
-                actions.append(MoveTo(x=carrier.position.x, z=carrier.position.z, radius=0, sprint=True))
-                return actions
+            if carrier is not None and _is_home_territory(carrier.position, obs.my_team):
+                if not on_home_side:
+                    home_target = _home_reentry_target(pos, obs.my_team)
+                    self._announce(actions, "Return home", home_target.x, home_target.z)
+                    actions.append(MoveTo(x=home_target.x, z=home_target.z, radius=1, sprint=True))
+                    return actions
+                if _manhattan(pos, carrier.position) <= FLAG_CARRIER_CHASE_RANGE:
+                    self._announce(actions, "Chasing carrier", carrier.position.x, carrier.position.z)
+                    actions.append(MoveTo(x=carrier.position.x, z=carrier.position.z, radius=0, sprint=True))
+                    return actions
 
-        # 4. Rescue jailed teammates
+        # 4. Rescue jailed teammates aggressively in 2v2 so teams do not deadlock
         jailed = tuple(t for t in obs.teammates if t.in_prison)
         nearest_jailed = _closest_player(pos, jailed)
-        if nearest_jailed is not None and _manhattan(pos, nearest_jailed.position) <= RESCUE_RANGE:
-            gate = _prison_gate_for_team(obs.my_team)
-            self._announce(actions, "Rescuing", gate.x, gate.z)
-            actions.append(MoveTo(x=gate.x, z=gate.z, radius=1, sprint=True))
+        if nearest_jailed is not None:
+            plate = _prison_outer_plate_for_team(obs.my_team)
+            self._announce(actions, "Rescuing", plate.x, plate.z)
+            actions.append(MoveTo(x=plate.x, z=plate.z, radius=0, sprint=True))
             return actions
 
         # 5. Intercept enemies in our territory
         intruders = tuple(
             e for e in enemies
-            if not e.in_prison
-            and ((obs.my_team == "L" and e.position.x < -2) or (obs.my_team == "R" and e.position.x > 2))
+            if not e.in_prison and _is_home_territory(e.position, obs.my_team)
         )
         nearest_intruder = _closest_player(pos, intruders)
-        if nearest_intruder is not None and _manhattan(pos, nearest_intruder.position) <= 20:
-            self._announce(actions, "Intercepting", nearest_intruder.position.x, nearest_intruder.position.z)
-            actions.append(MoveTo(x=nearest_intruder.position.x, z=nearest_intruder.position.z, radius=0, sprint=True))
-            return actions
+        if nearest_intruder is not None:
+            if not on_home_side:
+                home_target = _home_reentry_target(pos, obs.my_team)
+                self._announce(actions, "Return home", home_target.x, home_target.z)
+                actions.append(MoveTo(x=home_target.x, z=home_target.z, radius=1, sprint=True))
+                return actions
+            if _manhattan(pos, nearest_intruder.position) <= 20:
+                self._announce(actions, "Intercepting", nearest_intruder.position.x, nearest_intruder.position.z)
+                actions.append(MoveTo(x=nearest_intruder.position.x, z=nearest_intruder.position.z, radius=0, sprint=True))
+                return actions
 
         # 6. Opportunistic flag capture if nearby and safe
         capturable = _unplaced_flags(obs.flags_to_capture, obs.gold_block_positions)

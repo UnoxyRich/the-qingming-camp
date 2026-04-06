@@ -87,7 +87,7 @@ class World:
         js_bridge: JavaScriptBridge,
         team_num: int,
         player_num: int | str,
-        against_team: int | None = None,
+        against_team: int | str | None = None,
         total_player_per_team: int = 1,
         map_mode: str = "fixed",
         server: str = DEFAULT_SERVER,
@@ -554,17 +554,17 @@ class World:
             self._ready_prompt_event.set()
             self._log("Received 'Are you ready?' from system")
 
-        if "Game start: " in combined:
-            # Try each text fragment individually for JSON extraction
+        if "Game start" in combined:
+            # Try each text fragment individually for assignment extraction when present.
             for t in texts:
                 game_start_assignments = _extract_game_start_assignments(t)
                 if game_start_assignments is not None:
                     self._assigned_teams = game_start_assignments
                     self.team = game_start_assignments.get(self.bot_name)
-                    self._game_started = True
-                    self._game_start_event.set()
-                    self._log("Received 'Game start!' from system")
                     break
+            self._game_started = True
+            self._game_start_event.set()
+            self._log("Received 'Game start!' from system")
 
         if "Game over!" in combined:
             self._game_ended = True
@@ -625,11 +625,14 @@ def _normalize_bot_name(*, team_num: int, player_num: int | str) -> str:
 
 def _build_intent_message(
     *,
-    against_team: int | None,
+    against_team: int | str | None,
     total_player_per_team: int,
     map_mode: str,
 ) -> str:
-    against_value = "none" if against_team is None else str(against_team)
+    if against_team is None:
+        against_value = "none"
+    else:
+        against_value = str(against_team).strip().lower()
     return f"with {against_value} {total_player_per_team} {map_mode}"
 
 

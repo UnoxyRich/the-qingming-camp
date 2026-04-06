@@ -48,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--against",
         default=None,
         type=_parse_against_team,
-        help="The opposing team number, or 'none' for debugging mode.",
+        help="The opposing team number, or 'none'/'random' for special matchmaking modes.",
     )
     parser.add_argument(
         "--per-team-player",
@@ -186,16 +186,22 @@ def _parse_positive_int(value: str) -> int:
     return parsed
 
 
-def _parse_against_team(value: str) -> int | None:
+def _parse_against_team(value: str) -> int | str | None:
     normalized = value.strip().lower()
     if normalized == "none":
         return None
+    if normalized == "random":
+        return "random"
     try:
         parsed = int(normalized)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("Expected a positive integer or 'none'.") from exc
+        raise argparse.ArgumentTypeError(
+            "Expected a positive integer, 'none', or 'random'."
+        ) from exc
     if parsed <= 0:
-        raise argparse.ArgumentTypeError("Expected a positive integer or 'none'.")
+        raise argparse.ArgumentTypeError(
+            "Expected a positive integer, 'none', or 'random'."
+        )
     return parsed
 
 
