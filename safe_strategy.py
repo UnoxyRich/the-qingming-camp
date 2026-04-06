@@ -10,7 +10,7 @@ deep when home side pressure is under control.
 import time
 from dataclasses import dataclass
 
-from lib.actions import Chat, MoveTo
+from lib.actions import Chat, DashTo, MoveTo
 from lib.observation import BlockState, GridPosition, Observation, PlayerState, TeamName
 
 PRISON_GATES = {
@@ -31,6 +31,7 @@ TREE_SEARCH_RADIUS = 4
 THREAT_RANGE = 12
 SAFE_PUSH_PRESSURE = 6
 RETREAT_PRESSURE = 12
+INTERACT_RADIUS = 1
 
 
 def _distance(left: GridPosition, right: GridPosition) -> int:
@@ -205,6 +206,10 @@ def _move(target: GridPosition, *, radius: int = 1, avoid_entities: bool = False
     )
 
 
+def _score_move(target: GridPosition) -> DashTo:
+    return DashTo(x=target.x, z=target.z, radius=0, sprint=True, jump=True)
+
+
 @dataclass
 class SafeStrategy:
     chat_cooldown: float = 5.0
@@ -219,7 +224,7 @@ class SafeStrategy:
         self.lane_z = _lane_for_bot(obs, obs.bot_name)
         self.role = _role_for_bot(obs, obs.bot_name)
 
-    def compute_next_action(self, obs: Observation) -> list[MoveTo | Chat]:
+    def compute_next_action(self, obs: Observation) -> list[MoveTo | DashTo | Chat]:
         self.lane_z = _lane_for_bot(obs, obs.bot_name)
         self.role = _role_for_bot(obs, obs.bot_name)
 
@@ -230,7 +235,7 @@ class SafeStrategy:
         enemy_carrier = _enemy_flag_carrier(obs)
 
         if me.in_prison:
-            return self._issue(obs, me.position, "Break out", PRISON_GATES[obs.my_team], radius=0)
+            return self._issue(obs, me.position, "Break out", PRISON_GATES[obs.my_team], radius=INTERACT_RADIUS)
 
         if me.has_flag:
             return self._carry_flag(obs, me.position, active_enemies)
@@ -251,7 +256,7 @@ class SafeStrategy:
         obs: Observation,
         origin: GridPosition,
         active_enemies: tuple[PlayerState, ...],
-    ) -> list[MoveTo | Chat]:
+    ) -> list[MoveTo | DashTo | Chat]:
         if _is_enemy_side(origin, obs.my_team):
             crossing = _clamp_to_map(obs, HOME_ENTRY_X[obs.my_team], self.lane_z)
             return self._issue(obs, origin, "Retreat with flag", crossing, radius=1, avoid_entities=True)
@@ -260,7 +265,7 @@ class SafeStrategy:
         if _enemy_pressure(home_target, active_enemies) > RETREAT_PRESSURE:
             safer_hold = _clamp_to_map(obs, HOME_HOLD_X[obs.my_team], origin.z)
             return self._issue(obs, origin, "Stabilize home", safer_hold, radius=1, avoid_entities=True)
-        return self._issue(obs, origin, "Score flag", home_target, radius=0, avoid_entities=True)
+        return self._issue_score(obs, "Score flag", home_target)
 
     def _escort_carrier(
         self,
@@ -268,7 +273,7 @@ class SafeStrategy:
         origin: GridPosition,
         carrier: PlayerState,
         active_enemies: tuple[PlayerState, ...],
-    ) -> list[MoveTo | Chat]:
+    ) -> list[MoveTo | DashTo | Chat]:
         if _is_enemy_side(carrier.position, obs.my_team):
             escort_target = _clamp_to_map(obs, HOME_ENTRY_X[obs.my_team], carrier.position.z)
             return self._issue(obs, origin, "Escort return", escort_target, radius=1, avoid_entities=True)
@@ -286,7 +291,7 @@ class SafeStrategy:
         origin: GridPosition,
         home_intruders: tuple[PlayerState, ...],
         active_enemies: tuple[PlayerState, ...],
-    ) -> list[MoveTo | Chat]:
+    ) -> list[MoveTo | DashTo | Chat]:
         intruder = _closest_player(origin, home_intruders)
         if intruder is not None:
             return self._issue(obs, origin, "Guard home", intruder.position, radius=1, avoid_entities=True)
@@ -305,7 +310,7 @@ class SafeStrategy:
         origin: GridPosition,
         home_intruders: tuple[PlayerState, ...],
         active_enemies: tuple[PlayerState, ...],
-    ) -> list[MoveTo | Chat]:
+    ) -> list[MoveTo | DashTo | Chat]:
         if home_intruders:
             intruder = _closest_player(origin, home_intruders)
             if intruder is not None:
@@ -321,7 +326,7 @@ class SafeStrategy:
         stage_pressure = _enemy_pressure(stage_target, active_enemies)
 
         if flag_pressure <= SAFE_PUSH_PRESSURE and stage_pressure <= RETREAT_PRESSURE:
-            return self._issue(obs, origin, "Safe capture", assigned_flag, radius=0, avoid_entities=True)
+            return self._issue(obs, origin, "Safe capture", assigned_flag, radius=INTERACT_RADIUS, avoid_entities=True)
 
         if _is_enemy_side(origin, obs.my_team) and _enemy_pressure(origin, active_enemies) >= RETREAT_PRESSURE:
             fallback = _clamp_to_map(obs, MID_HOLD_X[obs.my_team], self.lane_z)
@@ -342,14 +347,25 @@ class SafeStrategy:
         *,
         radius: int,
         avoid_entities: bool = False,
-    ) -> list[MoveTo | Chat]:
-        actions: list[MoveTo | Chat] = []
+    ) -> list[MoveTo | DashTo | Chat]:
+        actions: list[MoveTo | DashTo | Chat] = []
         safe_target = _nearest_clear_target(obs, origin, target)
         self._announce(actions, intent, safe_target)
         actions.append(_move(safe_target, radius=radius, avoid_entities=avoid_entities))
         return actions
 
-    def _announce(self, actions: list[MoveTo | Chat], intent: str, target: GridPosition) -> None:
+    def _issue_score(
+        self,
+        obs: Observation,
+        intent: str,
+        target: GridPosition,
+    ) -> list[DashTo | Chat]:
+        actions: list[DashTo | Chat] = []
+        self._announce(actions, intent, target)
+        actions.append(_score_move(target))
+        return actions
+
+    def _announce(self, actions: list[MoveTo | DashTo | Chat], intent: str, target: GridPosition) -> None:
         signature = (intent, target.x, target.z)
         if signature == self.last_intent:
             return

@@ -10,7 +10,7 @@ utility option for its current role.
 import time
 from dataclasses import dataclass
 
-from lib.actions import Chat, MoveTo
+from lib.actions import Chat, DashTo, MoveTo
 from lib.observation import BlockState, GridPosition, Observation, PlayerState, TeamName
 
 PRISON_GATES = {
@@ -30,6 +30,7 @@ SWEEP_Z_POINTS = (-24, -12, 0, 12, 24)
 TREE_CLEARANCE_RADIUS = 1
 TREE_SEARCH_RADIUS = 4
 THREAT_RANGE = 12
+INTERACT_RADIUS = 1
 
 
 def _distance(left: GridPosition, right: GridPosition) -> int:
@@ -201,6 +202,10 @@ def _move(target: GridPosition, *, radius: int = 1, avoid_entities: bool = False
     )
 
 
+def _score_move(target: GridPosition) -> DashTo:
+    return DashTo(x=target.x, z=target.z, radius=0, sprint=True, jump=True)
+
+
 @dataclass
 class PressureStrategy:
     chat_cooldown: float = 5.0
@@ -219,7 +224,7 @@ class PressureStrategy:
         self.sweep_index = 0
         self.committed_flag = None
 
-    def compute_next_action(self, obs: Observation) -> list[MoveTo | Chat]:
+    def compute_next_action(self, obs: Observation) -> list[MoveTo | DashTo | Chat]:
         self.role = _role_for_bot(obs, obs.bot_name)
         self.lane_z = _lane_for_bot(obs, obs.bot_name)
 
@@ -228,7 +233,7 @@ class PressureStrategy:
 
         if me.in_prison:
             self.committed_flag = None
-            return self._issue(obs, me.position, "Break out", PRISON_GATES[obs.my_team], radius=0)
+            return self._issue(obs, me.position, "Break out", PRISON_GATES[obs.my_team], radius=INTERACT_RADIUS)
 
         if me.has_flag:
             self.committed_flag = None
@@ -254,10 +259,12 @@ class PressureStrategy:
         obs: Observation,
         origin: GridPosition,
         enemies: tuple[PlayerState, ...],
-    ) -> list[MoveTo | Chat]:
+    ) -> list[MoveTo | DashTo | Chat]:
+        if _is_home_side(origin, obs.my_team):
+            return self._issue_score(obs, "Score flag", _home_score_target(obs, origin))
+
         candidates: list[tuple[str, GridPosition, int, bool, int]] = []
         home_target = _home_score_target(obs, origin)
-        candidates.append(("Score flag", home_target, 0, True, 150))
         candidates.append(("Return home", _crossing_target(obs, self.lane_z, toward_enemy=False), 1, True, 120))
         for z_value in HOME_Z_POINTS:
             candidates.append(("Retreat lane", _clamp_to_map(obs, MID_GUARD_X[obs.my_team], z_value), 1, True, 80))
@@ -269,7 +276,7 @@ class PressureStrategy:
         origin: GridPosition,
         carrier: PlayerState,
         enemies: tuple[PlayerState, ...],
-    ) -> list[MoveTo | Chat]:
+    ) -> list[MoveTo | DashTo | Chat]:
         candidates: list[tuple[str, GridPosition, int, bool, int]] = []
         candidates.append(("Chase carrier", carrier.position, 1, True, 140))
         candidates.append(("Cut off carrier", _clamp_to_map(obs, HOME_ENTRY_X[obs.my_team], carrier.position.z), 1, True, 120))
@@ -281,7 +288,7 @@ class PressureStrategy:
         obs: Observation,
         origin: GridPosition,
         enemies: tuple[PlayerState, ...],
-    ) -> list[MoveTo | Chat]:
+    ) -> list[MoveTo | DashTo | Chat]:
         candidates: list[tuple[str, GridPosition, int, bool, int]] = []
         for enemy in enemies:
             if _is_home_side(enemy.position, obs.my_team):
@@ -297,13 +304,13 @@ class PressureStrategy:
         obs: Observation,
         origin: GridPosition,
         enemies: tuple[PlayerState, ...],
-    ) -> list[MoveTo | Chat]:
+    ) -> list[MoveTo | DashTo | Chat]:
         candidates: list[tuple[str, GridPosition, int, bool, int]] = []
 
         assigned_flag = self._refresh_committed_flag(obs) or _assigned_flag(obs, obs.bot_name)
         if assigned_flag is not None:
             self.committed_flag = assigned_flag
-            candidates.append(("Capture flag", assigned_flag, 0, True, 150 if self.role == "runner" else 120))
+            candidates.append(("Capture flag", assigned_flag, INTERACT_RADIUS, True, 150 if self.role == "runner" else 120))
 
         candidates.append(("Cross midfield", _crossing_target(obs, self.lane_z, toward_enemy=True), 1, False, 90))
         candidates.append(("Press lane", _clamp_to_map(obs, SWEEP_X[obs.my_team], self.lane_z), 1, False, 80))
@@ -328,7 +335,7 @@ class PressureStrategy:
         origin: GridPosition,
         candidates: list[tuple[str, GridPosition, int, bool, int]],
         enemies: tuple[PlayerState, ...],
-    ) -> list[MoveTo | Chat]:
+    ) -> list[MoveTo | DashTo | Chat]:
         ranked = []
         for intent, raw_target, radius, avoid_entities, base in candidates:
             safe_target = _nearest_clear_target(obs, origin, raw_target)
@@ -347,14 +354,25 @@ class PressureStrategy:
         *,
         radius: int,
         avoid_entities: bool = False,
-    ) -> list[MoveTo | Chat]:
-        actions: list[MoveTo | Chat] = []
+    ) -> list[MoveTo | DashTo | Chat]:
+        actions: list[MoveTo | DashTo | Chat] = []
         safe_target = _nearest_clear_target(obs, origin, target)
         self._announce(actions, intent, safe_target)
         actions.append(_move(safe_target, radius=radius, avoid_entities=avoid_entities))
         return actions
 
-    def _announce(self, actions: list[MoveTo | Chat], intent: str, target: GridPosition) -> None:
+    def _issue_score(
+        self,
+        obs: Observation,
+        intent: str,
+        target: GridPosition,
+    ) -> list[DashTo | Chat]:
+        actions: list[DashTo | Chat] = []
+        self._announce(actions, intent, target)
+        actions.append(_score_move(target))
+        return actions
+
+    def _announce(self, actions: list[MoveTo | DashTo | Chat], intent: str, target: GridPosition) -> None:
         signature = (intent, target.x, target.z)
         if signature == self.last_intent:
             return

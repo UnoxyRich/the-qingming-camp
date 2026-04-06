@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+AGAINST_TEAM=""
 ACTION_TICK_SECONDS="0.03"
 LEADER_STARTUP_DELAY_SECONDS="3"
 WAIT=false
@@ -8,6 +9,10 @@ DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --against-team)
+      AGAINST_TEAM="$2"
+      shift 2
+      ;;
     --action-tick)
       ACTION_TICK_SECONDS="$2"
       shift 2
@@ -31,6 +36,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "$AGAINST_TEAM" ]]; then
+  read -r -p "Enter the opponent team number to challenge: " AGAINST_TEAM
+fi
+
+if ! [[ "$AGAINST_TEAM" =~ ^[0-9]+$ ]] || [[ "$AGAINST_TEAM" -le 0 ]]; then
+  echo "Invalid team number. Enter a positive integer." >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
@@ -49,14 +63,10 @@ fi
 
 new_random_member_tag() {
   local exclude_csv="${1:-}"
-  local length="${2:-3}"
   local letters=(A B C D E F G H J K L M N P Q R S T U V W X Y Z)
   local tag
   while true; do
-    tag=""
-    for ((i=0; i<length; i++)); do
-      tag+="${letters[RANDOM % ${#letters[@]}]}"
-    done
+    tag="${letters[RANDOM % ${#letters[@]}]}"
     if [[ ",${exclude_csv}," != *",${tag},"* ]]; then
       printf '%s\n' "$tag"
       return
@@ -66,10 +76,9 @@ new_random_member_tag() {
 
 SERVER="10.31.0.101"
 TEAM_NUM="26"
-AGAINST_TEAM="random"
 PER_TEAM_PLAYER="2"
-MAP_MODE="random"
-STRATEGY_NAME="safe_strategy.SafeStrategy"
+MAP_MODE="fixed"
+STRATEGY_NAME="strat.FlagDashStrategy"
 
 leader_tag="$(new_random_member_tag)"
 follower_tag="$(new_random_member_tag "$leader_tag")"
@@ -82,11 +91,11 @@ bot_args_0=(main.py --my-team "$TEAM_NUM" --my-no "$follower_tag" --username "$f
 bot_args_1=(main.py --my-team "$TEAM_NUM" --my-no "$leader_tag" --username "$leader_username" --server "$SERVER" --against "$AGAINST_TEAM" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --wait-for-users "$follower_username" --verbose)
 
 echo
-echo "=== SAFE STRATEGY RANDOM MAP ==="
+echo "=== STRAT FIXED MAP ==="
 echo "Our team:      $TEAM_NUM  ($leader_username, $follower_username)"
-echo "Opponent:      $AGAINST_TEAM"
+echo "Challenge:     vs team $AGAINST_TEAM"
 echo "Server:        $SERVER"
-echo "Strategy:      SafeStrategy"
+echo "Strategy:      FlagDashStrategy"
 echo "Players/team:  $PER_TEAM_PLAYER"
 echo "Map:           $MAP_MODE"
 echo "Action tick:   ${ACTION_TICK_SECONDS}s"

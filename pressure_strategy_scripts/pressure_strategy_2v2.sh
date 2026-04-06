@@ -78,7 +78,7 @@ new_random_member_tag() {
 SERVER="10.31.0.101"
 PER_TEAM_PLAYER="2"
 TEAM_A="26"
-TEAM_B="27"
+TEAM_B="31"
 STRATEGY_NAME="pressure_strategy.PressureStrategy"
 
 team_a_leader_tag="$(new_random_member_tag)"
@@ -92,10 +92,10 @@ team_b_leader_username="CTF-${TEAM_B}-${team_b_leader_tag}"
 team_b_follower_username="CTF-${TEAM_B}-${team_b_follower_tag}"
 
 bot_delays=("0" "$TEAM_SPACING_DELAY_SECONDS" "$LEADER_STARTUP_DELAY_SECONDS" "$((LEADER_STARTUP_DELAY_SECONDS + TEAM_SPACING_DELAY_SECONDS))")
-bot_args_0=(main.py --my-team "$TEAM_A" --my-no "$team_a_follower_tag" --username "$team_a_follower_username" --server "$SERVER" --against "$TEAM_B" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --verbose)
-bot_args_1=(main.py --my-team "$TEAM_B" --my-no "$team_b_follower_tag" --username "$team_b_follower_username" --server "$SERVER" --against "$TEAM_A" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --verbose)
-bot_args_2=(main.py --my-team "$TEAM_A" --my-no "$team_a_leader_tag" --username "$team_a_leader_username" --server "$SERVER" --against "$TEAM_B" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --verbose)
-bot_args_3=(main.py --my-team "$TEAM_B" --my-no "$team_b_leader_tag" --username "$team_b_leader_username" --server "$SERVER" --against "$TEAM_A" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --verbose)
+bot_args_0=(main.py --my-team "$TEAM_A" --my-no "$team_a_follower_tag" --username "$team_a_follower_username" --server "$SERVER" --against "$TEAM_B" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --wait-for-users "$team_a_leader_username,$team_b_leader_username,$team_b_follower_username" --verbose)
+bot_args_1=(main.py --my-team "$TEAM_B" --my-no "$team_b_follower_tag" --username "$team_b_follower_username" --server "$SERVER" --against "$TEAM_A" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --wait-for-users "$team_a_leader_username,$team_a_follower_username,$team_b_leader_username" --verbose)
+bot_args_2=(main.py --my-team "$TEAM_A" --my-no "$team_a_leader_tag" --username "$team_a_leader_username" --server "$SERVER" --against "$TEAM_B" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --wait-for-users "$team_a_follower_username,$team_b_leader_username,$team_b_follower_username" --verbose)
+bot_args_3=(main.py --my-team "$TEAM_B" --my-no "$team_b_leader_tag" --username "$team_b_leader_username" --server "$SERVER" --against "$TEAM_A" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --wait-for-users "$team_a_leader_username,$team_a_follower_username,$team_b_follower_username" --verbose)
 
 echo
 echo "=== PRESSURE STRATEGY 2V2 ==="

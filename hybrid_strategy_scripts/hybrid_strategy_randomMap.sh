@@ -90,6 +90,7 @@ bot_args_0=(
   --map "$MAP_MODE"
   --action-tick "$ACTION_TICK_SECONDS"
   --strategy "$STRATEGY_NAME"
+  --wait-for-users "$leader_username"
   --verbose
 )
 bot_args_1=(
@@ -103,6 +104,7 @@ bot_args_1=(
   --map "$MAP_MODE"
   --action-tick "$ACTION_TICK_SECONDS"
   --strategy "$STRATEGY_NAME"
+  --wait-for-users "$follower_username"
   --verbose
 )
 

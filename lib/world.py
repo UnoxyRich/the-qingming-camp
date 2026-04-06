@@ -21,19 +21,19 @@ ONLINE_WAIT_TIMEOUT_SECONDS = 30.0
 DEFAULT_LOG_DIR = Path("logs")
 FAST_PATHFINDER_MAX_DROP_DOWN = 2
 FAST_PATHFINDER_COST_MULTIPLIER = 10
-FAST_PATHFINDER_SEARCH_RADIUS = 48
-FAST_PATHFINDER_TICK_TIMEOUT = 120
-FAST_PATHFINDER_THINK_TIMEOUT = 350
+FAST_PATHFINDER_SEARCH_RADIUS = 24
+FAST_PATHFINDER_TICK_TIMEOUT = 60
+FAST_PATHFINDER_THINK_TIMEOUT = 90
 SPRINT_REFRESH_SECONDS = 0.5
-BFS_GOAL_SEARCH_RADIUS = 18
+BFS_GOAL_SEARCH_RADIUS = 10
 PATH_AVOID_CELL_MEMORY_SECONDS = 6.0
 PATH_AVOID_NEIGHBOR_RADIUS = 3
 MAX_RECENT_CHAT_MESSAGES = 16
 JUMP_SUPPRESS_ENEMY_RADIUS = 8.0
-REPATH_SAME_GOAL_SECONDS = 0.25
-STUCK_MOVEMENT_SECONDS = 0.45
+REPATH_SAME_GOAL_SECONDS = 0.1
+STUCK_MOVEMENT_SECONDS = 0.25
 STUCK_PROGRESS_EPSILON = 0.3
-STUCK_RECOVERY_COOLDOWN_SECONDS = 1.0
+STUCK_RECOVERY_COOLDOWN_SECONDS = 0.4
 STUCK_RECOVERY_TURN_DISTANCE = 6.0
 STUCK_RECOVERY_ANGLE_DEGREES = 30.0
 LEAF_PATH_BUFFER_RADIUS = 1
@@ -137,7 +137,7 @@ class World:
         announce_intent: bool = True,
         expected_online_users: Iterable[str] | None = None,
         online_wait_timeout: float = ONLINE_WAIT_TIMEOUT_SECONDS,
-        settle_seconds: float = 0.3,
+        settle_seconds: float = 0.1,
         bounds: ScanBounds | None = None,
     ) -> None:
         self._js_bridge = js_bridge
@@ -615,7 +615,7 @@ class World:
             }
         )
         once(bot, "login")
-        time.sleep(1.5)
+        time.sleep(0.35)
         # Note: 'spawn' fires before 'login' returns on this server,
         # so we must NOT call once(bot, "spawn") here — it already happened.
         bot.loadPlugin(pathfinder.pathfinder)

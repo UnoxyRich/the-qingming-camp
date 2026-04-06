@@ -69,7 +69,7 @@ TEAM_NUM="26"
 AGAINST_TEAM="random"
 PER_TEAM_PLAYER="2"
 MAP_MODE="random"
-STRATEGY_NAME="safe_strategy.SafeStrategy"
+STRATEGY_NAME="strat.FlagDashStrategy"
 
 leader_tag="$(new_random_member_tag)"
 follower_tag="$(new_random_member_tag "$leader_tag")"
@@ -82,11 +82,11 @@ bot_args_0=(main.py --my-team "$TEAM_NUM" --my-no "$follower_tag" --username "$f
 bot_args_1=(main.py --my-team "$TEAM_NUM" --my-no "$leader_tag" --username "$leader_username" --server "$SERVER" --against "$AGAINST_TEAM" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --wait-for-users "$follower_username" --verbose)
 
 echo
-echo "=== SAFE STRATEGY RANDOM MAP ==="
+echo "=== STRAT RANDOM MAP ==="
 echo "Our team:      $TEAM_NUM  ($leader_username, $follower_username)"
 echo "Opponent:      $AGAINST_TEAM"
 echo "Server:        $SERVER"
-echo "Strategy:      SafeStrategy"
+echo "Strategy:      FlagDashStrategy"
 echo "Players/team:  $PER_TEAM_PLAYER"
 echo "Map:           $MAP_MODE"
 echo "Action tick:   ${ACTION_TICK_SECONDS}s"

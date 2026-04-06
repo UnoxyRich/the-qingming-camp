@@ -171,6 +171,8 @@ def _initialize_js_bridge() -> tuple[Any, JavaScriptBridge]:
             f"Root cause: {type(exc).__name__}: {exc}"
         ) from exc
 
+    _patch_javascript_proxy_cleanup()
+
     # In a fresh CLI process, import-time init is usually enough.
     # Only force a reset if the bridge probe fails.
     try:
@@ -194,6 +196,34 @@ def _initialize_js_bridge() -> tuple[Any, JavaScriptBridge]:
         require(module_name)
 
     return javascript, JavaScriptBridge(require=require, once=once, On=On, off=off)
+
+
+def _patch_javascript_proxy_cleanup() -> None:
+    try:
+        from javascript.proxy import Proxy
+    except Exception:
+        return
+
+    if getattr(Proxy, "_qingming_safe_del", False):
+        return
+
+    original_del = getattr(Proxy, "__del__", None)
+    if original_del is None:
+        return
+
+    def _safe_del(self) -> None:
+        executor = getattr(self, "_exe", None)
+        free = getattr(executor, "free", None)
+        ffid = getattr(self, "ffid", None)
+        if ffid is None or not callable(free):
+            return
+        try:
+            free(ffid)
+        except Exception:
+            return
+
+    Proxy.__del__ = _safe_del
+    Proxy._qingming_safe_del = True
 
 
 def _load_strategy(qualified_name: str):

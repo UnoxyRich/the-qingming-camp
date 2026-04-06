@@ -10,7 +10,7 @@ parking in place while waiting for a staged plan to settle.
 import time
 from dataclasses import dataclass
 
-from lib.actions import Chat, MoveTo
+from lib.actions import Chat, DashTo, MoveTo
 from lib.observation import BlockState, GridPosition, Observation, PlayerState, TeamName
 
 PRISON_GATES = {
@@ -29,6 +29,7 @@ INTERCEPT_RANGE = 14
 TARGET_REACHED_RADIUS = 2
 TREE_CLEARANCE_RADIUS = 1
 TREE_SEARCH_RADIUS = 4
+INTERACT_RADIUS = 1
 
 
 def _distance(left: GridPosition, right: GridPosition) -> int:
@@ -200,6 +201,10 @@ def _move(target: GridPosition, *, radius: int = 1, avoid_entities: bool = False
     )
 
 
+def _score_move(target: GridPosition) -> DashTo:
+    return DashTo(x=target.x, z=target.z, radius=0, sprint=True, jump=True)
+
+
 @dataclass
 class HybridStrategy:
     chat_cooldown: float = 5.0
@@ -216,14 +221,14 @@ class HybridStrategy:
         self.committed_flag = None
         self.sweep_index = 0
 
-    def compute_next_action(self, obs: Observation) -> list[MoveTo | Chat]:
+    def compute_next_action(self, obs: Observation) -> list[MoveTo | DashTo | Chat]:
         self.attack_lane_z = _lane_for_bot(obs, obs.bot_name)
 
         me = obs.self_player
 
         if me.in_prison:
             self.committed_flag = None
-            return self._issue(obs, me.position, "Break out", PRISON_GATES[obs.my_team], radius=0)
+            return self._issue(obs, me.position, "Break out", PRISON_GATES[obs.my_team], radius=INTERACT_RADIUS)
 
         if me.has_flag:
             self.committed_flag = None
@@ -243,7 +248,7 @@ class HybridStrategy:
 
         return self._issue_offense(obs)
 
-    def _issue_carrier(self, obs: Observation) -> list[MoveTo | Chat]:
+    def _issue_carrier(self, obs: Observation) -> list[MoveTo | DashTo | Chat]:
         me = obs.self_player
         if _is_enemy_side(me.position, obs.my_team):
             return self._issue(
@@ -254,16 +259,9 @@ class HybridStrategy:
                 radius=1,
                 avoid_entities=True,
             )
-        return self._issue(
-            obs,
-            me.position,
-            "Score flag",
-            _home_score_target(obs, me.position),
-            radius=0,
-            avoid_entities=True,
-        )
+        return self._issue_score(obs, "Score flag", _home_score_target(obs, me.position))
 
-    def _issue_offense(self, obs: Observation) -> list[MoveTo | Chat]:
+    def _issue_offense(self, obs: Observation) -> list[MoveTo | DashTo | Chat]:
         me = obs.self_player
 
         assigned_flag = self._refresh_committed_flag(obs) or _assigned_flag(obs, obs.bot_name)
@@ -273,7 +271,7 @@ class HybridStrategy:
                 entry = _crossing_point(obs, obs.my_team, self.attack_lane_z, toward_enemy=True)
                 if _distance(me.position, entry) > TARGET_REACHED_RADIUS:
                     return self._issue(obs, me.position, "Enter enemy side", entry, radius=1)
-            return self._issue(obs, me.position, "Capture flag", assigned_flag, radius=0)
+            return self._issue(obs, me.position, "Capture flag", assigned_flag, radius=INTERACT_RADIUS)
 
         # When the enemy flag is not currently visible, keep advancing instead of
         # stopping in place and waiting for a better calculation.
@@ -305,14 +303,25 @@ class HybridStrategy:
         *,
         radius: int,
         avoid_entities: bool = False,
-    ) -> list[MoveTo | Chat]:
-        actions: list[MoveTo | Chat] = []
+    ) -> list[MoveTo | DashTo | Chat]:
+        actions: list[MoveTo | DashTo | Chat] = []
         safe_target = _nearest_clear_target(obs, origin, target)
         self._announce(actions, intent, safe_target)
         actions.append(_move(safe_target, radius=radius, avoid_entities=avoid_entities))
         return actions
 
-    def _announce(self, actions: list[MoveTo | Chat], intent: str, target: GridPosition) -> None:
+    def _issue_score(
+        self,
+        obs: Observation,
+        intent: str,
+        target: GridPosition,
+    ) -> list[DashTo | Chat]:
+        actions: list[DashTo | Chat] = []
+        self._announce(actions, intent, target)
+        actions.append(_score_move(target))
+        return actions
+
+    def _announce(self, actions: list[MoveTo | DashTo | Chat], intent: str, target: GridPosition) -> None:
         signature = (intent, target.x, target.z)
         if signature == self.last_intent:
             return

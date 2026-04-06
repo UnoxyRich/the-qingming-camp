@@ -78,8 +78,8 @@ leader_username="CTF-${TEAM_NUM}-${leader_tag}"
 follower_username="CTF-${TEAM_NUM}-${follower_tag}"
 
 bot_delays=("0" "$LEADER_STARTUP_DELAY_SECONDS")
-bot_args_0=(main.py --my-team "$TEAM_NUM" --my-no "$follower_tag" --username "$follower_username" --server "$SERVER" --against "$AGAINST_TEAM" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --verbose)
-bot_args_1=(main.py --my-team "$TEAM_NUM" --my-no "$leader_tag" --username "$leader_username" --server "$SERVER" --against "$AGAINST_TEAM" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --verbose)
+bot_args_0=(main.py --my-team "$TEAM_NUM" --my-no "$follower_tag" --username "$follower_username" --server "$SERVER" --against "$AGAINST_TEAM" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --wait-for-users "$leader_username" --verbose)
+bot_args_1=(main.py --my-team "$TEAM_NUM" --my-no "$leader_tag" --username "$leader_username" --server "$SERVER" --against "$AGAINST_TEAM" --per-team-player "$PER_TEAM_PLAYER" --map "$MAP_MODE" --action-tick "$ACTION_TICK_SECONDS" --strategy "$STRATEGY_NAME" --wait-for-users "$follower_username" --verbose)
 
 echo
 echo "=== PRESSURE STRATEGY RANDOM MAP ==="
